@@ -28,7 +28,7 @@ static const char *__doc__ = "XDP loader and stats program\n"
 #include "flow_headers.h"
 #include "csv_utils.h"
 
-static const char *default_filename = "flow_ft.o";
+static const char *default_filename = "xdp-load-run.o";
 static const char *default_progname = "packet_handler";
 const char *model_path = "model.tflite"; // Path to model file
 

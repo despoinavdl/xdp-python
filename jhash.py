@@ -46,6 +46,6 @@ def jhash(key, initval=0):
     return c
 
 # Example usage
-key = b"Hello, JHASH!"
-seed = 12
-print(f"JHASH('{key.decode()}', seed={seed}) = 0x{jhash(key, seed):x}")
+# key = b"Hello, JHASH!"
+# seed = 12
+# print(f"JHASH('{key.decode()}', seed={seed}) = 0x{jhash(key, seed):x}")
