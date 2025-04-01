@@ -14,8 +14,14 @@
 //     __uint(max_entries, 1024); // Set a larger map size if needed
 // } counter_icmp SEC(".maps");
 
+struct floki
+{
+    __be32 ip;
+    __u8 ki;
+};
 
-BPF_HASH(counter_icmp, u32);
+// BPF_HASH(counter_icmp, u32);
+BPF_HASH(counter_icmp, u32, struct floki, 5);
 
 // Seed for jhash (you can choose a different value)
 #define HASH_SEED 0x12345678
@@ -34,25 +40,15 @@ int packet_handler(struct xdp_md *ctx)
         {
             if (ip->protocol == IPPROTO_ICMP)
             {
-                u32 key = 0;
+                struct floki floki = {0};
+                floki.ip = ip->daddr;
+                floki.ki = 1;
 
+                u32 hashked_key = jhash(&floki, sizeof(floki), HASH_SEED);
                 // Fetch current counter value or initialize it to 0
-                u64 *counter_value = counter_icmp.lookup(&key);
-                if (!counter_value) {
-                    u64 init_value = 1;
-                    counter_icmp.insert(&key, &init_value);
-                    counter_value = &init_value;
-                }
-                
-                // Increment the counter value
-                (*counter_value)++;
-                
-                u32 key2 = jhash(&ip->daddr, sizeof(ip->daddr), HASH_SEED);
-                // Fetch current counter value or initialize it to 0
-                u64 *tmp_value = counter_icmp.lookup(&key2);
-                if (!tmp_value) {
-                    u64 init_value = ip->daddr;
-                    counter_icmp.insert(&key2, &init_value);
+                struct floki *tmp_floki = counter_icmp.lookup(&hashked_key);
+                if (!tmp_floki) {
+                    counter_icmp.insert(&hashked_key, &floki);
                 }
 
                 // Return XDP_PASS to let the packet continue
