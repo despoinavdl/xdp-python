@@ -10,7 +10,7 @@
 // #define FLOW_TIMEOUT 100000000000 // 100 seconds timeout in nanoseconds for testing
 #define PACKETS_SAMPLE 12
 #define DBG_HASH_SEED 88
-#define STATE_HASH_SEED 66
+#define STATE_HASH_SEED 88
 
 /* This is the data record stored in the map */
 struct datarec
@@ -24,7 +24,7 @@ struct flow_key
     __be32 dst_ip;
     __be16 src_port;
     __be16 dst_port;
-    __u8 protocol;
+    __u32 protocol;
 };
 
 struct flow_info
@@ -33,7 +33,7 @@ struct flow_info
     __be32 dst_ip;
     __be16 src_port;
     __be16 dst_port;
-    __u8 protocol;
+    __u32 protocol;
     volatile __u32 packets;
     volatile __u64 bytes;
     __u64 first_seen;
@@ -55,7 +55,7 @@ enum states
 
 struct model_input
 {
-    __u8 protocol;
+    __u32 protocol;
     volatile __u64 duration;
     volatile __u32 pps;
     volatile __u32 bps;
