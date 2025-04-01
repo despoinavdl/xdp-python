@@ -3,6 +3,7 @@ from bcc.utils import printb
 import argparse
 import socket
 import time
+import ctypes
 from jhash import *
 
 FLOW_TIMEOUT = 5000000000 # 5 seconds timeout in nanoseconds
@@ -28,8 +29,8 @@ def get_protocol_name(protocol):
     return protocols.get(protocol, "Unknown")
 
 def print_flow_info(flow):
-    src_ip_str = socket.inet_ntoa(flow.src_ip.to_bytes(4, 'big'))
-    dst_ip_str = socket.inet_ntoa(flow.dst_ip.to_bytes(4, 'big'))
+    src_ip_str = socket.inet_ntoa(flow.src_ip.to_bytes(4, 'little'))
+    dst_ip_str = socket.inet_ntoa(flow.dst_ip.to_bytes(4, 'little'))
     
     print("-------------------------------")
     print(f"Source IP:       {src_ip_str}")
@@ -53,27 +54,38 @@ def print_flow_info(flow):
 # Malicious: 2,
 # Benign: 3
 def check_for_deletion(key, flow):
-    current_time = time.time()
+    current_time = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
     sig_map = b.get_table("sig_map")
-    if(key in sig_map): 
+    if key in sig_map: 
         # Check for timeout and if state = Ready
         # !!!!!!! MAKE THE FLOW DECISION !!!!!!!
         #
         state = sig_map[key]
-        print(f"State : {state}")
-        # if state == Ready
-        if(state == 1 or (current_time - flow.last_seen > FLOW_TIMEOUT)):
+        # print(f"State : {state}")
+        # if state == Ready or timeout
+        print(f"Current time: {current_time}")
+        print(f"Flow last seen: {flow.last_seen}")
+        if state == 1 or (current_time - flow.last_seen > FLOW_TIMEOUT):
             # For testing purposes, decide every flow to be malicious
             state = 2
-            sig_map[key] = state
+            c_state = ctypes.c_uint(state)
+            sig_map[key] = c_state
+            # sig_map.items_update_batch([key], [state])
 
-            # Delete flow from maps
-            hash_func_1.items_delete_batch([key])
-            hash_func_2.items_delete_batch([key])
-            hash_func_3.items_delete_batch([key])
-            hash_func_4.items_delete_batch([key])
-            hash_func_5.items_delete_batch([key])
-            dbg.items_delete_batch([key])
+            # Delete flow from hash func maps with their respective key
+            flowkey_bytes = struct.pack(
+                "IIHHI",
+                flow.src_ip, flow.dst_ip,
+                flow.src_port, flow.dst_port,
+                flow.protocol
+            )
+            hash_func_1.items_delete_batch((ctypes.c_uint32 * 1)(jhash(flowkey_bytes, map_seeds[0])))
+            hash_func_2.items_delete_batch((ctypes.c_uint32 * 1)(jhash(flowkey_bytes, map_seeds[1])))
+            hash_func_3.items_delete_batch((ctypes.c_uint32 * 1)(jhash(flowkey_bytes, map_seeds[2])))
+            hash_func_4.items_delete_batch((ctypes.c_uint32 * 1)(jhash(flowkey_bytes, map_seeds[3])))
+            hash_func_5.items_delete_batch((ctypes.c_uint32 * 1)(jhash(flowkey_bytes, map_seeds[4])))
+
+            dbg.items_delete_batch((ctypes.c_uint32 * 1)(key))
     else:
         print(f"{key} not found in sig_map")
 
@@ -107,7 +119,6 @@ try:
         dbg_items = dbg.items()
         if(dbg_items):
             for k, v in dbg_items:
-                print(f"\n{k.value} : {v}")
                 print_flow_info(v)
                 check_for_deletion(k, v)
         time.sleep(2)
