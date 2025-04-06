@@ -26,7 +26,7 @@ BPF_HASH(hash_func_4, u32, struct flow_info, XDP_MAX_MAP_ENTRIES);
 BPF_HASH(hash_func_5, u32, struct flow_info, XDP_MAX_MAP_ENTRIES);
 
 // Debug map to print aggregated results from cms to user space
-BPF_HASH(dbg, u32, struct flow_info, XDP_MAX_MAP_ENTRIES);
+BPF_HASH(aggr, u32, struct flow_info, XDP_MAX_MAP_ENTRIES);
 
 // Array map to keep the first_seen attribute of the most recent flow in order to calculate flow IAT (time between two flows)
 BPF_ARRAY(last_first_seen, u64, 5);
@@ -37,30 +37,60 @@ BPF_HASH(passed_packets, u32, struct datarec, 1);
 // Define the sig_map
 BPF_HASH(sig_map, u32, enum states, XDP_MAX_MAP_ENTRIES);
 
-// Function to update the last_first_seen map, used in update_map
-static __always_inline int update_last_first_seen(void *map, __u64 first_seen, __u32 key)
-{
-    int ret = bpf_map_update_elem(map, &key, &first_seen, BPF_ANY);
-    if (ret < 0)
-        return ret; // Return error code if update fails
+// Define a struct to hold the arrays that were on the stack
+struct stack_arrays {
+    u32 hashed_keys[NUM_MAPS];
+    u32 map_seeds[NUM_MAPS];
+};
 
-    return 0;
-}
+// Create a BPF per-CPU array map to store these arrays
+BPF_PERCPU_ARRAY(stack_arrays_map, struct stack_arrays, 1);
 
+// // Function to update the last_first_seen map, used in update_map
+// static __always_inline void update_last_first_seen(void *map, u64 first_seen, u32 key)
+// {
+//     map.update(&key, &first_seen);
+// }
+
+
+// 1: hash_func_1
+// 2: hash_func_2
+// 3: hash_func_3
+// 4: hash_func_4
+// 5: hash_func_5
 // Function to update the hash maps used for CMS key here is hashed
-static __always_inline int update_map(void *map, __u32 key, struct flow_info info, __u32 lfs_key, struct flow_info *aggregated)
+static __always_inline int update_map(u8 map_flag, u32 key, struct flow_info info, u32 lfs_key, struct flow_info *aggregated)
 {
     struct flow_info *rec;
     int ret;
-    __u64 *last_first_seen_value;
+    u64 *last_first_seen_value;
 
     /* Lookup in kernel BPF-side return pointer to actual data record */
-    rec = (struct flow_info *)bpf_map_lookup_elem(map, &key);
+    switch (map_flag) {
+        case 1:
+            rec = (struct flow_info *)hash_func_1.lookup(&key);
+            break;
+        case 2:
+            rec = (struct flow_info *)hash_func_2.lookup(&key);
+            break;
+        case 3:
+            rec = (struct flow_info *)hash_func_3.lookup(&key);
+            break;
+        case 4:
+            rec = (struct flow_info *)hash_func_4.lookup(&key);
+            break;
+        case 5:
+            rec = (struct flow_info *)hash_func_5.lookup(&key);
+            break;
+        default:
+            return -1;
+    }
+    // rec = (struct flow_info *)map.lookup(&key);
 
     // If the entry is not found, initialize it
     if (!rec)
     {
-        last_first_seen_value = (__u64 *)bpf_map_lookup_elem(&last_first_seen, &lfs_key);
+        last_first_seen_value = (u64 *)last_first_seen.lookup(&lfs_key);
 
         if (!last_first_seen_value)
             return -1;
@@ -72,13 +102,31 @@ static __always_inline int update_map(void *map, __u32 key, struct flow_info inf
             info.iat = info.first_seen - *last_first_seen_value;
 
         // Update last_first_seen map
-        ret = update_last_first_seen(&last_first_seen, info.first_seen, lfs_key);
-        if (ret < 0)
-            return ret;
+        // update_last_first_seen(&last_first_seen, info.first_seen, lfs_key);
+        last_first_seen.update(&lfs_key, &(info.first_seen));
 
-        ret = bpf_map_update_elem(map, &key, &info, BPF_ANY);
-        if (ret < 0)
-            return ret;
+
+        // Update the map
+        switch (map_flag) {
+            case 1:
+                hash_func_1.update(&key, &info);
+                break;
+            case 2:
+                hash_func_2.update(&key, &info);
+                break;
+            case 3:
+                hash_func_3.update(&key, &info);
+                break;
+            case 4:
+                hash_func_4.update(&key, &info);
+                break;
+            case 5:
+                hash_func_5.update(&key, &info);
+                break;
+            default:
+                return -1;
+        }
+        // map.update(&key, &info);
 
         aggregated->packets = info.packets;
         aggregated->bytes = info.bytes;
@@ -143,49 +191,78 @@ static __always_inline int update_map(void *map, __u32 key, struct flow_info inf
     return 0;
 }
 
-static __always_inline int update_passed_packets(void)
+static __always_inline void update_passed_packets(void)
 {
-    __u32 zero = 0;
+    u32 zero = 0;
     struct datarec *rec = {0};
     struct datarec new_rec = {.packets = 1};
     int ret;
 
-    // rec = (struct datarec *)bpf_map_lookup_elem((void *)&passed_packets, &zero);
     rec = (struct datarec *)passed_packets.lookup(&zero);
     if (!rec)
     {
         // First entry - initialize the counter
-        ret = bpf_map_update_elem((void *)&passed_packets, &zero, &new_rec, BPF_ANY);
-        if (ret < 0)
-            return ret;
-
-        return 0;
+        passed_packets.insert(&zero, &new_rec);
+        return;
     }
 
     lock_xadd(&rec->packets, 1);
+}
+
+// 0: hash_func_1
+// 1: hash_func_2
+// 2: hash_func_3
+// 3: hash_func_4
+// 4: hash_func_5
+// 5: aggr
+static __always_inline int delete_from_map(u8 map_flag, struct flow_key key, u32 seed)
+{
+    u32 hashed_key = jhash(&key, sizeof(key), seed);
+    switch (map_flag) {
+        case 0:
+            aggr.delete(&hashed_key);
+            break;
+        case 1:
+            hash_func_1.delete(&hashed_key);
+            break;
+        case 2:
+            hash_func_2.delete(&hashed_key);
+            break;
+        case 3:
+            hash_func_3.delete(&hashed_key);
+            break;
+        case 4:
+            hash_func_4.delete(&hashed_key);
+            break;
+        case 5:
+            hash_func_5.delete(&hashed_key);
+            break;
+        default:
+            return -1;
+    }
+    // map.delete(&hashed_key);
     return 0;
 }
 
-// static __always_inline int delete_from_map(void *map, struct flow_key key, __u32 seed)
-// {
-//     __u32 hashed_key = jhash(&key, sizeof(key), seed);
-//     int ret;
-
-//     ret = bpf_map_delete_elem(map, &hashed_key);
-//     if (ret < 0)
-//         return ret;
-
-//     return 0;
-// }
-
 int packet_handler(struct xdp_md *ctx)
 {
-    const __u32 map_seeds[] = {12, 37, 42, 68, 91};
+    u32 zero = 0;
+    struct stack_arrays empty = {0}; // Initialize with zeros
+    struct stack_arrays *arrays = stack_arrays_map.lookup_or_try_init(&zero, &empty);
+    if (!arrays)
+        return XDP_ABORTED;
+
+    // Initialize the map_seeds in the array
+    arrays->map_seeds[0] = 12;
+    arrays->map_seeds[1] = 37;
+    arrays->map_seeds[2] = 42;
+    arrays->map_seeds[3] = 68;
+    arrays->map_seeds[4] = 91;
 
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
     struct ethhdr *eth = data;
-    __u64 size = data_end - data;
+    u64 size = data_end - data;
     struct flow_key key = {0};
     struct flow_info info = {0};
     int ret;
@@ -193,28 +270,22 @@ int packet_handler(struct xdp_md *ctx)
     if ((void *)eth + sizeof(*eth) > data_end)
     {
         // Increment the counter value for passed packets
-        ret = update_passed_packets();
-        if (ret < 0)
-            return XDP_ABORTED;
+        update_passed_packets();
         return XDP_PASS;
     }
 
     if (ntohs(eth->h_proto) != ETH_P_IP)
     {
         return XDP_DROP;
-        ret = update_passed_packets();
-        if (ret < 0)
-            return XDP_ABORTED;
-        // printk("EtherType: 0x%x\n", ntohs(eth->h_proto));
+        update_passed_packets();
+        printk("EtherType: 0x%x\n", ntohs(eth->h_proto));
         return XDP_PASS;
     }
 
     struct iphdr *ip = data + sizeof(*eth);
     if ((void *)ip + sizeof(*ip) > data_end)
     {
-        ret = update_passed_packets();
-        if (ret < 0)
-            return XDP_ABORTED;
+        update_passed_packets();
         return XDP_PASS;
     }
 
@@ -228,9 +299,7 @@ int packet_handler(struct xdp_md *ctx)
         struct tcphdr *tcp = (void *)ip + sizeof(*ip);
         if ((void *)tcp + sizeof(*tcp) > data_end)
         {
-            ret = update_passed_packets();
-            if (ret < 0)
-                return XDP_ABORTED;
+            update_passed_packets();
             return XDP_PASS;
         }
 
@@ -243,9 +312,7 @@ int packet_handler(struct xdp_md *ctx)
         struct udphdr *udp = (void *)ip + sizeof(*ip);
         if ((void *)udp + sizeof(*udp) > data_end)
         {
-            ret = update_passed_packets();
-            if (ret < 0)
-                return XDP_ABORTED;
+            update_passed_packets();
             return XDP_PASS;
         }
 
@@ -260,38 +327,21 @@ int packet_handler(struct xdp_md *ctx)
     }
 
     // Check if the signature already exists in the sig_map and the decision is already taken
-    __u32 state_key = jhash(&key, sizeof(key), STATE_HASH_SEED);
-    enum states *state_ptr;
-    enum states state;
-    state_ptr = bpf_map_lookup_elem(&sig_map, &state_key);
-    if (!state_ptr)
-    {
-        // If the entry doesn't exist, create it
-        state = Waiting;
-    }
-    else
-    {
+    u32 state_key = jhash(&key, sizeof(key), STATE_HASH_SEED);
+    enum states *state_ptr = sig_map.lookup(&state_key);
+
+    enum states state = Waiting;
+    if (state_ptr) {
         state = *state_ptr;
-        switch (state)
-        {
-        case Malicious:
-            // printk("Dropped a 'Malicious' packet");
+        if (state == Malicious) {
             return XDP_DROP;
-        case Benign:
-            ret = update_passed_packets();
-            if (ret < 0)
-                return XDP_ABORTED;
+        } else if (state == Benign) {
+            update_passed_packets();
             return XDP_PASS;
-        default:
-            break;
         }
     }
-    ret = bpf_map_update_elem(&sig_map, &state_key, &state, BPF_ANY);
-    if (ret < 0)
-    {
-        // printk("Couldn't create the sig_map entry\n");
-        return ret;
-    }
+
+    sig_map.update(&state_key, &state);
 
     info.src_ip = key.src_ip;
     info.dst_ip = key.dst_ip;
@@ -307,10 +357,9 @@ int packet_handler(struct xdp_md *ctx)
     info.bps = 0;
     info.iat = 0;
 
-    __u32 hashed_keys[NUM_MAPS];
     for (int i = 0; i < NUM_MAPS; i++)
     {
-        hashed_keys[i] = jhash(&key, sizeof(key), map_seeds[i]);
+        arrays->hashed_keys[i] = jhash(&key, sizeof(key), arrays->map_seeds[i]);
     }
 
     struct flow_info agg = {0};
@@ -329,86 +378,48 @@ int packet_handler(struct xdp_md *ctx)
     agg.iat = 0;
 
     // Update cms hash_func1 map
-    ret = update_map(&hash_func_1, hashed_keys[0], info, 0, &agg);
-    if (ret < 0)
-        return XDP_ABORTED;
+    update_map(1, arrays->hashed_keys[0], info, 0, &agg);
 
     // Update cms hash_func2 map
-    ret = update_map(&hash_func_2, hashed_keys[1], info, 1, &agg);
-    if (ret < 0)
-    {
-        // delete_from_map(&hash_func_1, key, map_seeds[0]);
-        return XDP_ABORTED;
-    }
+    update_map(2, arrays->hashed_keys[1], info, 1, &agg);
 
     // Update cms hash_func3 map
-    ret = update_map(&hash_func_3, hashed_keys[2], info, 2, &agg);
-    if (ret < 0)
-    {
-        // delete_from_map(&hash_func_1, key, map_seeds[0]);
-        // delete_from_map(&hash_func_2, key, map_seeds[1]);
-        return XDP_ABORTED;
-    }
+    update_map(3, arrays->hashed_keys[2], info, 2, &agg);
 
     // Update cms hash_func4 map
-    ret = update_map(&hash_func_4, hashed_keys[3], info, 3, &agg);
-    if (ret < 0)
-    {
-        // delete_from_map(&hash_func_1, key, map_seeds[0]);
-        // delete_from_map(&hash_func_2, key, map_seeds[1]);
-        // delete_from_map(&hash_func_3, key, map_seeds[2]);
-        return XDP_ABORTED;
-    }
+    update_map(4, arrays->hashed_keys[3], info, 3, &agg);
 
     // Update cms hash_func5 map
-    ret = update_map(&hash_func_5, hashed_keys[4], info, 4, &agg);
-    if (ret < 0)
-    {
-        // delete_from_map(&hash_func_1, key, map_seeds[0]);
-        // delete_from_map(&hash_func_2, key, map_seeds[1]);
-        // delete_from_map(&hash_func_3, key, map_seeds[2]);
-        // delete_from_map(&hash_func_4, key, map_seeds[3]);
-        return XDP_ABORTED;
-    }
+    update_map(5, arrays->hashed_keys[4], info, 4, &agg);
 
-    // Add agg to dbg map
-    __u32 dbg_key = jhash(&key, sizeof(key), DBG_HASH_SEED);
-    ret = bpf_map_update_elem(&dbg, &dbg_key, &agg, BPF_ANY);
-    if (ret < 0)
-    {
-        // // printk("Could not update debug map\n");
-        return XDP_ABORTED;
-    }
+    // Add agg to aggr map
+    u32 aggr_key = jhash(&key, sizeof(key), AGGR_HASH_SEED);
+    aggr.update(&aggr_key, &agg);
 
-    // __u64 current_time = bpf_ktime_get_ns();
-    // __u64 time_since_last_seen = current_time - agg.last_seen;
-    // // printk("Current time - Last Seen = %llu\n", time_since_last_seen);
+    // u64 current_time = bpf_ktime_get_ns();
+    // u64 time_since_last_seen = current_time - agg.last_seen;
+    // bpf_printk("Current time - Last Seen = %llu\n", time_since_last_seen);
     // Check number of packets and flow timeout
-    if (agg.packets > PACKETS_SAMPLE) // || ((current_time - agg.last_seen) > FLOW_TIMEOUT))
+
+    bpf_trace_printk("flow packets: %u, PACKETS_SAMPLE: %d\n", agg.packets, PACKETS_SAMPLE);
+    if (agg.packets >= PACKETS_SAMPLE) // || ((current_time - agg.last_seen) > FLOW_TIMEOUT))
     {
         // Change the state in sig_map to Ready
         state = Ready;
-        ret = bpf_map_update_elem(&sig_map, &state_key, &state, BPF_ANY);
-        if (ret < 0)
-        {
-            // printk("Couldn't update the sig_map entry\n");
-            return ret;
-        }
+        sig_map.update(&state_key, &state);
 
-        // Delete from maps
-        // delete_from_map(&hash_func_1, key, map_seeds[0]);
-        // delete_from_map(&hash_func_2, key, map_seeds[1]);
-        // delete_from_map(&hash_func_3, key, map_seeds[2]);
-        // delete_from_map(&hash_func_4, key, map_seeds[3]);
-        // delete_from_map(&hash_func_5, key, map_seeds[4]);
-        // delete_from_map(&dbg, key, DBG_HASH_SEED);
+        // Delete from debug map 
+        delete_from_map(0, key, AGGR_HASH_SEED);
+
+        // Delete from hash_func maps
+        delete_from_map(1, key, arrays->map_seeds[0]);
+        delete_from_map(2, key, arrays->map_seeds[1]);
+        delete_from_map(3, key, arrays->map_seeds[2]);
+        delete_from_map(4, key, arrays->map_seeds[3]);
+        delete_from_map(5, key, arrays->map_seeds[4]);
     }
 
     // Increment the counter value for passed packets
-    ret = update_passed_packets();
-    if (ret < 0)
-    {
-        return XDP_ABORTED;
-    }
+    update_passed_packets();
     return XDP_PASS;
 }

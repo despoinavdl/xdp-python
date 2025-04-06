@@ -7,10 +7,11 @@ import ctypes
 from jhash import *
 
 FLOW_TIMEOUT = 5000000000 # 5 seconds timeout in nanoseconds
+# FLOW_TIMEOUT = 100000000000 # 100 seconds timeout in nanoseconds for testing
 
 parser = argparse.ArgumentParser(description="Process command-line arguments.")
 parser.add_argument("--device", type=str, default="lo", help="Network device to use")
-parser.add_argument("--source", type=str, default="xdp_prog_1.c", help="eBPF program file name")
+parser.add_argument("--source", type=str, default="xdp_prog.c", help="eBPF program file name")
 parser.add_argument("--func", type=str, default="packet_handler", help="Function name")
 
 args = parser.parse_args()
@@ -65,12 +66,16 @@ def check_for_deletion(key, flow):
         # if state == Ready or timeout
         print(f"Current time: {current_time}")
         print(f"Flow last seen: {flow.last_seen}")
-        if state == 1 or (current_time - flow.last_seen > FLOW_TIMEOUT):
+        if state.value==1 or (current_time - flow.last_seen > FLOW_TIMEOUT):
             # For testing purposes, decide every flow to be malicious
             state = 2
-            c_state = ctypes.c_uint(state)
-            sig_map[key] = c_state
+            # c_state = ctypes.c_uint(state)
+            # sig_map[key] = c_state
             # sig_map.items_update_batch([key], [state])
+            sig_map.items_update_batch(
+                (ctypes.c_uint32 * 1)(key),   # Convert `key` to a ctypes array
+                (ctypes.c_uint32 * 1)(state)  # Convert `state` to a ctypes array
+            )
 
             # Delete flow from hash func maps with their respective key
             flowkey_bytes = struct.pack(
@@ -85,7 +90,7 @@ def check_for_deletion(key, flow):
             hash_func_4.items_delete_batch((ctypes.c_uint32 * 1)(jhash(flowkey_bytes, map_seeds[3])))
             hash_func_5.items_delete_batch((ctypes.c_uint32 * 1)(jhash(flowkey_bytes, map_seeds[4])))
 
-            dbg.items_delete_batch((ctypes.c_uint32 * 1)(key))
+            aggr.items_delete_batch((ctypes.c_uint32 * 1)(key))
     else:
         print(f"{key} not found in sig_map")
 
@@ -105,7 +110,7 @@ hash_func_4 = b.get_table("hash_func_4")
 hash_func_5 = b.get_table("hash_func_5")
 
 passed_packets = b.get_table("passed_packets")
-dbg = b.get_table("dbg")
+aggr = b.get_table("aggr")
 sig_map = b.get_table("sig_map")
 
 
@@ -115,13 +120,13 @@ try:
 
     while(1):
 
-        dbg = b.get_table("dbg")
-        dbg_items = dbg.items()
-        if(dbg_items):
-            for k, v in dbg_items:
+        aggr = b.get_table("aggr")
+        aggr_items = aggr.items()
+        if(aggr_items):
+            for k, v in aggr_items:
                 print_flow_info(v)
                 check_for_deletion(k, v)
-        time.sleep(2)
+        time.sleep(0.1)
 
 except KeyboardInterrupt:
     print("\nUnloading xdp program from device...")

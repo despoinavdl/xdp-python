@@ -9,7 +9,7 @@
 #define FLOW_TIMEOUT 5000000000 // 5 seconds timeout in nanoseconds
 // #define FLOW_TIMEOUT 100000000000 // 100 seconds timeout in nanoseconds for testing
 #define PACKETS_SAMPLE 12
-#define DBG_HASH_SEED 88
+#define AGGR_HASH_SEED 88
 #define STATE_HASH_SEED 88
 
 /* This is the data record stored in the map */
