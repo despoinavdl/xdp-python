@@ -4,7 +4,7 @@
 #ifndef __COMMON_KERN_USER_H
 #define __COMMON_KERN_USER_H
 
-#define NUM_MAPS 5
+#define NUM_HASH_FUNCTIONS 5
 // #define FLOW_TIMEOUT 3000000000 // 3 seconds timeout in nanoseconds
 #define FLOW_TIMEOUT 5000000000 // 5 seconds timeout in nanoseconds
 // #define FLOW_TIMEOUT 100000000000 // 100 seconds timeout in nanoseconds for testing
