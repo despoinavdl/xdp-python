@@ -1,9 +1,3 @@
-/* This common_kern_user.h is used by kernel side BPF-progs and
- * userspace programs, for sharing common struct's and DEFINEs.
- */
-#ifndef __COMMON_KERN_USER_H
-#define __COMMON_KERN_USER_H
-
 #define NUM_HASH_FUNCTIONS 5
 // #define FLOW_TIMEOUT 3000000000 // 3 seconds timeout in nanoseconds
 #define FLOW_TIMEOUT 5000000000 // 5 seconds timeout in nanoseconds
@@ -73,5 +67,3 @@ struct model_input
 #ifndef XDP_MAX_MAP_ENTRIES
 #define XDP_MAX_MAP_ENTRIES 1024
 #endif
-
-#endif /* __COMMON_KERN_USER_H */

@@ -13,10 +13,6 @@
 
 #include "flow_headers.h"
 
-#ifndef lock_xadd
-#define lock_xadd(ptr, val) ((void)__sync_fetch_and_add(ptr, val))
-#endif
-
 // Constants
 #define UINT64_MAX (~0ULL) // Maximum value for 64-bit unsigned integer
 #define UINT32_MAX (~0U)   // Maximum value for 32-bit unsigned integer
