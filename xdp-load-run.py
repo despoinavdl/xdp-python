@@ -17,8 +17,8 @@ import struct
 from jhash import jhash  # Custom jhash implementation
 
 # Constants
-FLOW_TIMEOUT = 5_000_000_000  # 5 seconds timeout in nanoseconds
-# FLOW_TIMEOUT = 100_000_000_000  # 100 seconds timeout in nanoseconds for testing
+# FLOW_TIMEOUT = 5_000_000_000  # 5 seconds timeout in nanoseconds
+FLOW_TIMEOUT = 100_000_000_000  # 100 seconds timeout in nanoseconds for testing
 MAP_SEEDS = [12, 37, 42, 68, 91]  # Hash function seeds matching the eBPF program
 
 # Flow state constants
@@ -151,13 +151,7 @@ def main():
         "sig_map": bpf.get_table("sig_map"),
         "aggr": bpf.get_table("aggr"),
     }
-    
-    # Pin the aggregation map to the BPF filesystem
-    aggr_map_path = "/sys/fs/bpf/aggr"
-    aggr_fd = bpf_tables["aggr"].map_fd
-    lib.bpf_obj_pin(aggr_fd, aggr_map_path.encode())
-    print(f"Aggregation map pinned to: {aggr_map_path}")
-    
+        
     try:
         print("Flow monitor running. Press Ctrl+C to exit.")
         
