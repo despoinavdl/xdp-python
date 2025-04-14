@@ -148,11 +148,21 @@ static __always_inline int update_map(u8 map_flag, u32 key, struct flow_info inf
         rec->duration = rec->last_seen - rec->first_seen;
 
         // Calculate rates if we have valid duration
-        if (rec->duration != 0) {
+        // if (rec->duration != 0) {
+        //     // Packets per second with 1 decimal point accuracy (2.3pps -> 23 pps)
+        //     rec->pps = (rec->packets * 10000000000) / rec->duration;
+        //     // Bytes per second with no decimal point accuracy
+        //     rec->bps = (rec->bytes * 1000000000) / rec->duration;
+        // }
+        if (rec->duration >= 1000000000) { //if duration >= 1 second
             // Packets per second with 1 decimal point accuracy (2.3pps -> 23 pps)
             rec->pps = (rec->packets * 10000000000) / rec->duration;
             // Bytes per second with no decimal point accuracy
             rec->bps = (rec->bytes * 1000000000) / rec->duration;
+        }
+        else {
+            rec->pps = rec->packets;
+            rec->bps = rec->bytes;
         }
     }
 
