@@ -176,11 +176,6 @@ def main():
         # Clean up
         print(f"Unloading XDP program from device: {args.device}")
         bpf.remove_xdp(args.device, 0)
-        
-        # Remove pinned map
-        if os.path.exists(aggr_map_path):
-            os.remove(aggr_map_path)
-            print(f"Removed pinned map: {aggr_map_path}")
 
 if __name__ == "__main__":
     main()
