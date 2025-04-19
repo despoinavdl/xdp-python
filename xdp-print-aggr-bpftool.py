@@ -39,12 +39,12 @@ def print_flow_info(flow):
     print(f"Protocol:        {get_protocol_name(flow['protocol'])}")
     print(f"Packets:         {flow['packets']}")
     print(f"Bytes:           {flow['bytes']}")
-    print(f"First Seen:      {flow['first_seen']} ns since epoch")
-    print(f"Last Seen:       {flow['last_seen']} ns since epoch")
+    print(f"First Seen:      {flow['first_seen'] / 1_000_000_000} s (since epoch)")
+    print(f"Last Seen:       {flow['last_seen'] / 1_000_000_000} s (since epoch)")
     print(f"Duration:        {duration_seconds:.3f} sec")
     print(f"PPS:             {pps:.1f} packets/sec")
     print(f"BPS:             {bps} bytes/sec")
-    print(f"IAT:             {flow['iat']} ns")
+    print(f"IAT:             {flow['iat'] / 1_000_000_000} s")
     print("-------------------------------------------")
 
 def get_map_entries():
