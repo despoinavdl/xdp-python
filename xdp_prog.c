@@ -35,7 +35,7 @@ BPF_ARRAY(last_first_seen, u64, NUM_HASH_FUNCTIONS);
 BPF_HASH(passed_packets, u32, struct datarec, 1);
 
 // Map for tracking flow states (Waiting, Ready, Malicious, Benign)
-BPF_HASH(sig_map, u32, enum states, XDP_MAX_MAP_ENTRIES);
+BPF_TABLE("lru_hash", u32, enum states, sig_map, 400000);
 
 // Structure to hold hash keys and seeds (moved from stack to avoid stack size limitations)
 struct hash_info {

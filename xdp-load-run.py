@@ -7,6 +7,9 @@ for network flow monitoring. It periodically checks flows and makes decisions ab
 whether they are malicious or benign.
 """
 
+import torch
+import numpy as np
+
 from bcc import BPF, lib
 import argparse
 import socket
@@ -14,11 +17,13 @@ import time
 import ctypes
 import os
 import struct
+
+from MLP import *
 from jhash import jhash  # Custom jhash implementation
 
 # Constants
-# FLOW_TIMEOUT = 5_000_000_000  # 5 seconds timeout in nanoseconds
-FLOW_TIMEOUT = 100_000_000_000  # 100 seconds timeout in nanoseconds for testing
+FLOW_TIMEOUT = 5_000_000_000  # 5 seconds timeout in nanoseconds
+# FLOW_TIMEOUT = 100_000_000_000  # 100 seconds timeout in nanoseconds for testing
 MAP_SEEDS = [12, 37, 42, 68, 91]  # Hash function seeds matching the eBPF program
 
 # Flow state constants
@@ -78,7 +83,58 @@ def pack_flow_key(flow):
         flow.protocol
     )
 
-def process_flow(key, flow, bpf_tables):
+# Function to load the model
+def load_model(model_path="best_mlp_model.pt"):
+    """
+    Load the pre-trained MLP model from state_dict on CPU
+    """
+    if not os.path.exists(model_path):
+        print(f"Error: Model file {model_path} not found")
+        return None
+    
+    # Create model with the same architecture
+    input_size = 7  # Number of features
+    model = MLP(input_size)
+    
+    # Load the state_dict on CPU
+    state_dict = torch.load(model_path, map_location=torch.device('cpu'))
+    
+    # Handle the case where the model was saved with DataParallel or similar wrapper
+    # This removes the "module." prefix from all keys in the state dictionary
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        if key.startswith('module.'):
+            new_key = key[7:]  # Remove 'module.' prefix
+            new_state_dict[new_key] = value
+        else:
+            new_state_dict[key] = value
+    
+    # Load the modified state dict
+    model.load_state_dict(new_state_dict)
+    model.eval()  # Set the model to evaluation mode
+    return model
+
+# Function to preprocess the flow data
+def preprocess_flow(flow):
+    """
+    Convert flow information to feature vector for model input
+    """
+    # Extract and normalize features according to the model's expected input
+    features = np.array([
+        flow.protocol,                # Protocol
+        flow.duration / 1_000_000_000,# Flow Duration
+        flow.packets,                 # Total Fwd Packets
+        flow.bytes,                   # Fwd Packets Length Total
+        flow.bps,                     # Flow Bytes/s
+        flow.pps / 10,                # Flow Packets/s (adjusted as in print_flow_info)
+        flow.iat                      # Flow IAT Mean
+    ], dtype=np.float32)
+
+    # Convert to PyTorch tensor
+    features_tensor = torch.tensor(features, dtype=torch.float32).unsqueeze(0)  # Add batch dimension
+    return features_tensor
+
+def process_flow(key, flow, bpf_tables, model):
     """
     Process a flow and make classification decisions
     
@@ -92,6 +148,7 @@ def process_flow(key, flow, bpf_tables):
         key: The flow key in the sig_map
         flow: The flow information structure
         bpf_tables: Dictionary containing all BPF map tables
+        model: Pre-trained PyTorch model for flow classification
     """
     current_time = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
     sig_map = bpf_tables["sig_map"]
@@ -102,8 +159,30 @@ def process_flow(key, flow, bpf_tables):
         
         # Check if flow is ready for classification or has timed out
         if state.value == STATE_READY or (current_time - flow.last_seen > FLOW_TIMEOUT):
-            # For testing purposes, classify every flow as malicious
-            new_state = STATE_MALICIOUS
+            # Use model for classification if available
+            if model is not None:
+                try:
+                    # Preprocess flow data
+                    input_features = preprocess_flow(flow)
+                    
+                    # Need to temporarily set the model to evaluation mode but with no tracking
+                    with torch.no_grad():
+                        # For batch normalization to work with single sample
+                        model.eval()
+                        output = model(input_features)
+                        # Assuming binary classification where 1 = malicious, 0 = benign
+                        prediction = output.item() > 0.5  # Adjust threshold as needed
+                    
+                    # Set state based on model prediction
+                    new_state = STATE_MALICIOUS if prediction else STATE_BENIGN
+                    print(f"Flow classified as {'MALICIOUS' if prediction else 'BENIGN'} (confidence: {output.item():.4f})")
+                except Exception as e:
+                    print(f"Error during model inference: {e}")
+                    new_state = STATE_MALICIOUS  # Default to malicious on error
+            else:
+                # Fallback to default classification if model not available
+                print("Model not available, using default classification")
+                new_state = STATE_MALICIOUS
             
             # Update the state in sig_map
             sig_map.items_update_batch(
@@ -131,6 +210,13 @@ def main():
     """Main function to load and run the eBPF program"""
     # Parse command line arguments
     args = parse_arguments()
+
+    # Load the ML model
+    model = load_model()
+    if model is None:
+        print("Warning: Failed to load model, will use default classification")
+    else:
+        print("Model loaded successfully")
     
     # Load the eBPF program from the source file
     bpf = BPF(src_file=args.source)
@@ -165,7 +251,7 @@ def main():
                 for key, flow in aggr_items:
                     # Uncomment to debug flow details
                     # print_flow_info(flow)
-                    process_flow(key, flow, bpf_tables)
+                    process_flow(key, flow, bpf_tables, model)
                     
             # Sleep briefly to avoid CPU hogging
             # time.sleep(0.1)

@@ -62,5 +62,5 @@ struct model_input
 #endif
 
 #ifndef XDP_MAX_MAP_ENTRIES
-#define XDP_MAX_MAP_ENTRIES 1024
+#define XDP_MAX_MAP_ENTRIES 1024000
 #endif
