@@ -225,11 +225,11 @@ int packet_handler(struct xdp_md *ctx)
         return XDP_ABORTED;
 
     // Initialize hash function seeds
-    hash_inf->map_seeds[0] = 12;
-    hash_inf->map_seeds[1] = 37;
-    hash_inf->map_seeds[2] = 42;
-    hash_inf->map_seeds[3] = 68;
-    hash_inf->map_seeds[4] = 91;
+    hash_inf->map_seeds[0] = HASH_FUNC_1_SEED;
+    hash_inf->map_seeds[1] = HASH_FUNC_2_SEED;
+    hash_inf->map_seeds[2] = HASH_FUNC_3_SEED;
+    hash_inf->map_seeds[3] = HASH_FUNC_4_SEED;
+    hash_inf->map_seeds[4] = HASH_FUNC_5_SEED;
 
     // Access packet data
     void *data = (void *)(long)ctx->data;

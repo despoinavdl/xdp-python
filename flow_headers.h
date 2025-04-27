@@ -1,8 +1,12 @@
 #define NUM_HASH_FUNCTIONS 5
 #define PACKETS_SAMPLE 12
-#define AGGR_HASH_SEED 88
-#define STATE_HASH_SEED 88
-
+#define AGGR_HASH_SEED 4007
+#define STATE_HASH_SEED 4007
+#define HASH_FUNC_1_SEED 17
+#define HASH_FUNC_2_SEED 53
+#define HASH_FUNC_3_SEED 97
+#define HASH_FUNC_4_SEED 193
+#define HASH_FUNC_5_SEED 389
 /* This is the data record stored in the map */
 struct datarec
 {
