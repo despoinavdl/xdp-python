@@ -22,8 +22,9 @@ from MLP import *
 from jhash import jhash  # Custom jhash implementation
 
 # Constants
-FLOW_TIMEOUT = 5_000_000_000  # 5 seconds timeout in nanoseconds
-# FLOW_TIMEOUT = 100_000_000_000  # 100 seconds timeout in nanoseconds for testing
+# FLOW_TIMEOUT = 5_000_000_000  # 5 seconds timeout in nanoseconds
+FLOW_TIMEOUT = 50000000000  # 50 seconds timeout in nanoseconds
+# FLOW_TIMEOUT = 100_000_000_000_000  # 100 seconds timeout in nanoseconds for testing
 MAP_SEEDS = [17, 53, 97, 193, 389]  # Hash function seeds matching the eBPF program
 
 # Flow state constants
@@ -40,7 +41,9 @@ def parse_arguments():
     parser.add_argument("--source", type=str, default="xdp_prog.c", 
                         help="eBPF program file name")
     parser.add_argument("--func", type=str, default="packet_handler", 
-                        help="Function name to attach")
+                        help="Function name to attach"),
+    parser.add_argument("--debug", type=int, default=0,
+                        help="Print debugging information")
     
     return parser.parse_args()
 
@@ -128,7 +131,7 @@ def load_scaler(scaler_path="feature_scaler.joblib"):
         return None
 
 # Function to preprocess the flow data
-def preprocess_flow(flow, scaler=None):
+def preprocess_flow(flow, scaler=None, debug=0):
     """
     Convert flow information to feature vector for model input
     """
@@ -153,20 +156,23 @@ def preprocess_flow(flow, scaler=None):
     features = np.hstack([categorical_features, numerical_features])
     
     # Print for debugging
-    feature_names = [
-        'Protocol', 'Flow Duration', 'Total Fwd Packets',
-        'Fwd Packets Length Total', 'Flow Bytes/s', 'Flow Packets/s', 'Flow IAT Mean'
-    ]
-    print("=== INFERENCE INPUT ===")
-    for name, value in zip(feature_names, features):
-        print(f"{name}: {value}")
-    print("=======================")
+    if debug:
+        feature_names = [
+            'Protocol', 'Flow Duration', 'Total Fwd Packets',
+            'Fwd Packets Length Total', 'Flow Bytes/s', 'Flow Packets/s', 'Flow IAT Mean'
+        ]
+        print("=== INFERENCE INPUT ===")
+        for name, value in zip(feature_names, features):
+            print(f"{name}: {value}")
+        print("=======================")
 
    # Convert to PyTorch tensor
     features_tensor = torch.tensor(features, dtype=torch.float32).unsqueeze(0)
     return features_tensor
 
-def process_flow(key, flow, bpf_tables, model, scaler=None):
+benign_flows = 0
+malicious_flows = 0
+def process_flow(key, flow, bpf_tables, model, scaler=None, debug=0):
     """
     Process a flow and make classification decisions
     
@@ -182,6 +188,8 @@ def process_flow(key, flow, bpf_tables, model, scaler=None):
         bpf_tables: Dictionary containing all BPF map tables
         model: Pre-trained PyTorch model for flow classification
     """
+    global benign_flows
+    global malicious_flows
     current_time = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
     sig_map = bpf_tables["sig_map"]
     
@@ -195,7 +203,7 @@ def process_flow(key, flow, bpf_tables, model, scaler=None):
             if model is not None:
                 try:
                     # Preprocess flow data
-                    input_features = preprocess_flow(flow, scaler)
+                    input_features = preprocess_flow(flow, scaler, debug)
                     
                     # Need to temporarily set the model to evaluation mode but with no tracking
                     with torch.no_grad():
@@ -207,7 +215,12 @@ def process_flow(key, flow, bpf_tables, model, scaler=None):
                     
                     # Set state based on model prediction
                     new_state = STATE_MALICIOUS if prediction else STATE_BENIGN
-                    print(f"Flow classified as {'MALICIOUS' if prediction else 'BENIGN'} (confidence: {output.item():.4f})")
+                    if prediction:
+                        malicious_flows += 1
+                    else: 
+                        benign_flows +=1
+                    if debug:
+                        print(f"Flow classified as {'MALICIOUS' if prediction else 'BENIGN'} (confidence: {output.item():.4f})")
                 except Exception as e:
                     print(f"Error during model inference: {e}")
                     new_state = STATE_MALICIOUS  # Default to malicious on error
@@ -229,12 +242,17 @@ def process_flow(key, flow, bpf_tables, model, scaler=None):
             for i, seed in enumerate(MAP_SEEDS):
                 hashed_key = jhash(flowkey_bytes, seed)
                 hash_table = bpf_tables[f"hash_func_{i+1}"]
-                hash_table.items_delete_batch((ctypes.c_uint32 * 1)(hashed_key))
-                if i == 0:  # Only print for the first hash map
-                    print(f"Deleting flow from hash tables with key: {hashed_key}")
-            
-            # Remove from aggregation map
-            bpf_tables["aggr"].items_delete_batch((ctypes.c_uint32 * 1)(key))
+                try:
+                    hash_table.items_delete_batch((ctypes.c_uint32 * 1)(hashed_key))
+                    if i == 0 and debug:  # Only print for the first hash map
+                        print(f"Deleting flow from hash tables with key: {hashed_key}")
+                except Exception:
+                    continue
+            try:
+                # Remove from aggregation map
+                bpf_tables["aggr"].items_delete_batch((ctypes.c_uint32 * 1)(key))
+            except Exception:
+                    pass
     else:
         print(f"Flow key {key} not found in sig_map")
 
@@ -287,8 +305,9 @@ def main():
             if aggr_items:
                 for key, flow in aggr_items:
                     # Uncomment to debug flow details
-                    # print_flow_info(flow)
-                    process_flow(key, flow, bpf_tables, model, scaler)
+                    if args.debug:
+                        print_flow_info(flow)
+                    process_flow(key, flow, bpf_tables, model, scaler, args.debug)
                     
             # Sleep briefly to avoid CPU hogging
             # time.sleep(0.1)
@@ -299,6 +318,9 @@ def main():
         # Clean up
         print(f"Unloading XDP program from device: {args.device}")
         bpf.remove_xdp(args.device, 0)
+        total_flows = benign_flows + malicious_flows
+        print(f"Malicious flows: {malicious_flows}/{total_flows}")
+        print(f"Benign flows: {benign_flows}/{total_flows}")
 
 if __name__ == "__main__":
     main()
