@@ -44,7 +44,7 @@ def print_flow_info(flow):
     print(f"Duration:        {duration_seconds:.3f} sec")
     print(f"PPS:             {pps:.1f} packets/sec")
     print(f"BPS:             {bps} bytes/sec")
-    print(f"IAT:             {flow['iat'] / 1_000_000_000} s")
+    print(f"IAT:             {flow['iat_mean'] / 1_000_000_000} s")
     print("-------------------------------------------")
 
 def get_map_entries():

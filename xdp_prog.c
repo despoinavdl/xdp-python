@@ -28,9 +28,6 @@ BPF_HASH(hash_func_5, u32, struct flow_info, XDP_MAX_MAP_ENTRIES);
 // Map for aggregated results from CMS for userspace access
 BPF_HASH(aggr, u32, struct flow_info, XDP_MAX_MAP_ENTRIES);
 
-// Array map to track timestamps between consecutive flows (for IAT calculation)
-BPF_ARRAY(last_first_seen, u64, NUM_HASH_FUNCTIONS);
-
 // Counter for packets that passed through XDP
 BPF_HASH(passed_packets, u32, struct datarec, 1);
 
@@ -71,15 +68,16 @@ static __always_inline void update_passed_packets(void)
  * map_flag: Index of the hash map to update (1-5)
  * key: Hashed flow key
  * info: Flow information to store/update
- * lfs_key: Key for the last_first_seen array
  * aggregated: Pointer to store aggregated min values
  * return 0 on success, -1 on error
  */
-static __always_inline int update_map(u8 map_flag, u32 key, struct flow_info info, u32 lfs_key, struct flow_info *aggregated)
+static __always_inline int update_map(u8 map_flag, u32 key, struct flow_info info, struct flow_info *aggregated)
 {
     struct flow_info *rec;
     int ret;
-    u64 *last_first_seen_value;
+    u32 packets_old;
+    u64 last_seen_old;
+    u64 iat_mean_old;
 
     // Select the appropriate map based on map_flag
     switch (map_flag) {
@@ -90,26 +88,9 @@ static __always_inline int update_map(u8 map_flag, u32 key, struct flow_info inf
         case 5: rec = (struct flow_info *)hash_func_5.lookup(&key); break;
         default: return -1;
     }
-    // rec = (struct flow_info *)map.lookup(&key);
 
     // If entry doesn't exist yet, initialize it
     if (!rec) {
-        // Retrieve the last seen timestamp for IAT calculation
-        last_first_seen_value = (u64 *)last_first_seen.lookup(&lfs_key);
-        if (!last_first_seen_value)
-            return -1;
-
-        // Calculate inter-arrival time (IAT)
-        if (*last_first_seen_value == 0)
-            info.iat = 0;
-
-        else
-            info.iat = info.first_seen - *last_first_seen_value;
-
-        // Update last_first_seen map with current timestamp
-        last_first_seen.update(&lfs_key, &(info.first_seen));
-
-
         // Insert new entry into the appropriate map
         switch (map_flag) {
             case 1: hash_func_1.update(&key, &info); break;
@@ -128,7 +109,7 @@ static __always_inline int update_map(u8 map_flag, u32 key, struct flow_info inf
         aggregated->duration = info.duration;
         aggregated->pps = info.pps;
         aggregated->bps = info.bps;
-        aggregated->iat = info.iat;
+        aggregated->iat_mean = info.iat_mean;
 
         return 0;
     }
@@ -136,6 +117,11 @@ static __always_inline int update_map(u8 map_flag, u32 key, struct flow_info inf
     // Entry exists - update it with new information
     // Acquire lock
     bpf_spin_lock(&rec->lock);
+
+    // Save old values for Mean IAT calculation
+    packets_old = rec->packets;
+    last_seen_old = rec->last_seen;
+    iat_mean_old = rec->iat_mean;
 
     // Update packet and byte counters, if this packet is newer than what we've seen
     rec->packets += info.packets;
@@ -148,12 +134,6 @@ static __always_inline int update_map(u8 map_flag, u32 key, struct flow_info inf
         rec->duration = rec->last_seen - rec->first_seen;
 
         // Calculate rates if we have valid duration
-        // if (rec->duration != 0) {
-        //     // Packets per second with 1 decimal point accuracy (2.3pps -> 23 pps)
-        //     rec->pps = (rec->packets * 10000000000) / rec->duration;
-        //     // Bytes per second with no decimal point accuracy
-        //     rec->bps = (rec->bytes * 1000000000) / rec->duration;
-        // }
         if (rec->duration >= 1000000000) { //if duration >= 1 second
             // Packets per second with 1 decimal point accuracy (2.3pps -> 23 pps)
             rec->pps = (rec->packets * 10000000000) / rec->duration;
@@ -165,6 +145,9 @@ static __always_inline int update_map(u8 map_flag, u32 key, struct flow_info inf
             rec->bps = rec->bytes;
         }
     }
+
+    rec->iat_mean = ((iat_mean_old * packets_old) + rec->last_seen - last_seen_old) / rec->packets;
+
 
     bpf_spin_unlock(&rec->lock);  // Release lock
 
@@ -192,8 +175,8 @@ static __always_inline int update_map(u8 map_flag, u32 key, struct flow_info inf
     if (rec->bps < aggregated->bps)
         aggregated->bps = rec->bps;
 
-    if (rec->iat > aggregated->iat)
-        aggregated->iat = rec->iat;
+    if (rec->iat_mean > aggregated->iat_mean)
+        aggregated->iat_mean = rec->iat_mean;
 
     return 0;
 }
@@ -330,7 +313,7 @@ int packet_handler(struct xdp_md *ctx)
     info.duration = 0;
     info.pps = 0;
     info.bps = 0;
-    info.iat = 0;
+    info.iat_mean = 0;
 
     // Compute key hash values for each map
     for (int i = 0; i < NUM_HASH_FUNCTIONS; i++)
@@ -353,14 +336,14 @@ int packet_handler(struct xdp_md *ctx)
     agg.duration = UINT64_MAX;
     agg.pps = UINT32_MAX;
     agg.bps = UINT32_MAX;
-    agg.iat = 0;
+    agg.iat_mean = 0;
 
     // Update each CMS hash map
-    update_map(1, hash_inf->hashed_keys[0], info, 0, &agg);
-    update_map(2, hash_inf->hashed_keys[1], info, 1, &agg);
-    update_map(3, hash_inf->hashed_keys[2], info, 2, &agg);
-    update_map(4, hash_inf->hashed_keys[3], info, 3, &agg);
-    update_map(5, hash_inf->hashed_keys[4], info, 4, &agg);
+    update_map(1, hash_inf->hashed_keys[0], info, &agg);
+    update_map(2, hash_inf->hashed_keys[1], info, &agg);
+    update_map(3, hash_inf->hashed_keys[2], info, &agg);
+    update_map(4, hash_inf->hashed_keys[3], info, &agg);
+    update_map(5, hash_inf->hashed_keys[4], info, &agg);
 
     // Add aggregated flow info to aggr map
     u32 aggr_key = jhash(&key, sizeof(key), AGGR_HASH_SEED);

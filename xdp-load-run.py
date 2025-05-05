@@ -22,8 +22,8 @@ from MLP import *
 from jhash import jhash  # Custom jhash implementation
 
 # Constants
-# FLOW_TIMEOUT = 5_000_000_000  # 5 seconds timeout in nanoseconds
-FLOW_TIMEOUT = 50000000000  # 50 seconds timeout in nanoseconds
+FLOW_TIMEOUT = 5_000_000_000  # 5 seconds timeout in nanoseconds
+# FLOW_TIMEOUT = 50000000000  # 50 seconds timeout in nanoseconds
 # FLOW_TIMEOUT = 100_000_000_000_000  # 100 seconds timeout in nanoseconds for testing
 MAP_SEEDS = [17, 53, 97, 193, 389]  # Hash function seeds matching the eBPF program
 
@@ -74,7 +74,7 @@ def print_flow_info(flow):
     print(f"Duration:        {flow.duration}")
     print(f"PPS:             {flow.pps / 10:.1f}")  # Adjust for decimal point
     print(f"BPS:             {flow.bps}")
-    print(f"IAT:             {flow.iat}")
+    print(f"IAT:             {flow.iat_mean}")
     print("-------------------------------")
 
 def pack_flow_key(flow):
@@ -145,9 +145,25 @@ def preprocess_flow(flow, scaler=None, debug=0):
         flow.bytes,                     # Fwd Packets Length Total
         flow.bps,                       # Flow Bytes/s
         flow.pps / 10,                  # Flow Packets/s (adjusted)
-        flow.iat                        # Flow IAT Mean
+        flow.iat_mean / 1000000         # Flow IAT Mean (unit in dataset?)
     ], dtype=np.float32)
     
+
+    ##################################
+    # DELETE THESE LINES AFTER TESTING
+    features = np.hstack([categorical_features, numerical_features])
+    feature_names = [
+            'Protocol', 'Flow Duration', 'Total Fwd Packets',
+            'Fwd Packets Length Total', 'Flow Bytes/s', 'Flow Packets/s', 'Flow IAT Mean'
+        ]
+    print("========= INFERENCE INPUT =========")
+    print("BEFORE SCALING:")
+    for name, value in zip(feature_names, features):
+        print(f"{name}: {value}")
+    print("-" * 23)
+    ##################################
+
+
     # Apply the same scaling as during training to numerical features only
     if scaler is not None:
         numerical_features = scaler.transform(numerical_features.reshape(1, -1)).flatten()
@@ -161,10 +177,11 @@ def preprocess_flow(flow, scaler=None, debug=0):
             'Protocol', 'Flow Duration', 'Total Fwd Packets',
             'Fwd Packets Length Total', 'Flow Bytes/s', 'Flow Packets/s', 'Flow IAT Mean'
         ]
-        print("=== INFERENCE INPUT ===")
+        # print("=== INFERENCE INPUT ===")
+        print("AFTER SCALING:")
         for name, value in zip(feature_names, features):
             print(f"{name}: {value}")
-        print("=======================")
+        print("===================================")
 
    # Convert to PyTorch tensor
     features_tensor = torch.tensor(features, dtype=torch.float32).unsqueeze(0)
@@ -245,7 +262,7 @@ def process_flow(key, flow, bpf_tables, model, scaler=None, debug=0):
                 try:
                     hash_table.items_delete_batch((ctypes.c_uint32 * 1)(hashed_key))
                     if i == 0 and debug:  # Only print for the first hash map
-                        print(f"Deleting flow from hash tables with key: {hashed_key}")
+                        print(f"Deleting flow from hash tables with key: {hashed_key}\n\n")
                 except Exception:
                     continue
             try:
@@ -305,8 +322,8 @@ def main():
             if aggr_items:
                 for key, flow in aggr_items:
                     # Uncomment to debug flow details
-                    if args.debug:
-                        print_flow_info(flow)
+                    # if args.debug:
+                    #     print_flow_info(flow)
                     process_flow(key, flow, bpf_tables, model, scaler, args.debug)
                     
             # Sleep briefly to avoid CPU hogging

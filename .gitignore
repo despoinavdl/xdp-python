@@ -1,2 +1,7 @@
 # Python virtual environment
 tf-env/
+__pycache__/
+model-test.py
+outtext-bpf.txt
+outtext.txt
+xdp_prog_old.c
