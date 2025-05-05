@@ -1,5 +1,5 @@
 #define NUM_HASH_FUNCTIONS 5
-#define PACKETS_SAMPLE 12
+#define PACKETS_SAMPLE 12000000
 #define AGGR_HASH_SEED 4007
 #define STATE_HASH_SEED 4007
 #define HASH_FUNC_1_SEED 17
@@ -36,7 +36,7 @@ struct flow_info
     volatile __u64 duration;
     volatile __u32 pps;
     volatile __u32 bps;
-    volatile __u64 iat; // inter arrival time
+    volatile __u64 iat_mean; // mean inter arrival time between packets of a flow
     struct bpf_spin_lock lock;
 };
 
@@ -46,15 +46,6 @@ enum states
     Ready = 1,
     Malicious = 2,
     Benign = 3
-};
-
-struct model_input
-{
-    __u32 protocol;
-    volatile __u64 duration;
-    volatile __u32 pps;
-    volatile __u32 bps;
-    volatile __u64 iat; // inter arrival time
 };
 
 #ifndef lock_xadd
