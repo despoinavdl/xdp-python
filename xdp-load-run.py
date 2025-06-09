@@ -22,7 +22,7 @@ from MLP import *
 from jhash import jhash  # Custom jhash implementation
 
 # Constants
-FLOW_TIMEOUT = 5_000_000_000  # 5 seconds timeout in nanoseconds
+# FLOW_TIMEOUT = 5_000_000_000  # 5 seconds timeout in nanoseconds
 # FLOW_TIMEOUT = 50000000000  # 50 seconds timeout in nanoseconds
 # FLOW_TIMEOUT = 100_000_000_000_000  # 100 seconds timeout in nanoseconds for testing
 MAP_SEEDS = [17, 53, 97, 193, 389]  # Hash function seeds matching the eBPF program
@@ -215,7 +215,8 @@ def process_flow(key, flow, bpf_tables, model, scaler=None, debug=0):
         state = sig_map[key]
         
         # Check if flow is ready for classification or has timed out
-        if state.value == STATE_READY or (current_time - flow.last_seen > FLOW_TIMEOUT):
+        # if state.value == STATE_READY or (current_time - flow.last_seen > FLOW_TIMEOUT):
+        if state.value == STATE_READY:
             # Use model for classification if available
             if model is not None:
                 try:
@@ -326,8 +327,20 @@ def main():
                     #     print_flow_info(flow)
                     process_flow(key, flow, bpf_tables, model, scaler, args.debug)
                     
-            # Sleep briefly to avoid CPU hogging
+            # Sleep briefly to avoid CPU hogging 
             # time.sleep(0.1)
+
+        # Main processing loop
+        # while True:
+        #     # Refresh the aggregation map (it might have been updated by the eBPF program)
+        #     bpf_tables["hash_func_1"] = bpf.get_table("hash_func_1")
+        #     hash_func_1_items = bpf_tables["hash_func_1"].items()
+            
+        #     if hash_func_1_items:
+        #         for key, flow in hash_func_1_items:
+                    
+        #             process_flow(key, flow, bpf_tables, model, scaler, args.debug)
+
             
     except KeyboardInterrupt:
         print("\nShutting down...")

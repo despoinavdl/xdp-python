@@ -338,7 +338,7 @@ int packet_handler(struct xdp_md *ctx)
     agg.bps = UINT32_MAX;
     agg.iat_mean = 0;
 
-    // Update each CMS hash map
+    // Update each CMS hash map & the aggr map
     update_map(1, hash_inf->hashed_keys[0], info, &agg);
     update_map(2, hash_inf->hashed_keys[1], info, &agg);
     update_map(3, hash_inf->hashed_keys[2], info, &agg);
@@ -352,7 +352,7 @@ int packet_handler(struct xdp_md *ctx)
     bpf_trace_printk("flow packets: %u, PACKETS_SAMPLE: %d\n", agg.packets, PACKETS_SAMPLE);
 
     // Check if we've collected enough samples to make a decision (flow timeout?)
-    if (agg.packets >= PACKETS_SAMPLE) // || ((current_time - agg.last_seen) > FLOW_TIMEOUT))
+    if (agg.packets >= PACKETS_SAMPLE && state == Waiting) // || ((current_time - agg.last_seen) > FLOW_TIMEOUT))
     {
         // Change the state in sig_map to Ready
         state = Ready;
