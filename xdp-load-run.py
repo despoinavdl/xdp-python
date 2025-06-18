@@ -77,15 +77,6 @@ def print_flow_info(flow):
     print(f"IAT:             {flow.iat_mean}")
     print("-------------------------------")
 
-def pack_flow_key(flow):
-    """Pack flow information into bytes for hashing"""
-    return struct.pack(
-        "IIHHI",
-        flow.src_ip, flow.dst_ip,
-        flow.src_port, flow.dst_port,
-        flow.protocol
-    )
-
 # Function to load the model
 def load_model(model_path="best_mlp_model.pt"):
     """
@@ -131,12 +122,12 @@ def load_scaler(scaler_path="feature_scaler.joblib"):
         return None
 
 # Function to preprocess the flow data
-def preprocess_flow(flow, scaler=None, debug=0):
+def preprocess_flow(key, flow, scaler=None, debug=0):
     """
     Convert flow information to feature vector for model input
     """
     # Extract features - keep protocol as-is
-    categorical_features = [flow.protocol]
+    categorical_features = [key.protocol]
     
     # Extract numerical features
     numerical_features = np.array([
@@ -151,16 +142,16 @@ def preprocess_flow(flow, scaler=None, debug=0):
 
     ##################################
     # DELETE THESE LINES AFTER TESTING
-    features = np.hstack([categorical_features, numerical_features])
-    feature_names = [
-            'Protocol', 'Flow Duration', 'Total Fwd Packets',
-            'Fwd Packets Length Total', 'Flow Bytes/s', 'Flow Packets/s', 'Flow IAT Mean'
-        ]
-    print("========= INFERENCE INPUT =========")
-    print("BEFORE SCALING:")
-    for name, value in zip(feature_names, features):
-        print(f"{name}: {value}")
-    print("-" * 23)
+    # features = np.hstack([categorical_features, numerical_features])
+    # feature_names = [
+    #         'Protocol', 'Flow Duration', 'Total Fwd Packets',
+    #         'Fwd Packets Length Total', 'Flow Bytes/s', 'Flow Packets/s', 'Flow IAT Mean'
+    #     ]
+    # print("========= INFERENCE INPUT =========")
+    # print("BEFORE SCALING:")
+    # for name, value in zip(feature_names, features):
+    #     print(f"{name}: {value}")
+    # print("-" * 23)
     ##################################
 
 
@@ -190,6 +181,7 @@ def preprocess_flow(flow, scaler=None, debug=0):
 benign_flows = 0
 malicious_flows = 0
 def process_flow(key, flow, bpf_tables, model, scaler=None, debug=0):
+    # print("In process flow!")
     """
     Process a flow and make classification decisions
     
@@ -213,6 +205,7 @@ def process_flow(key, flow, bpf_tables, model, scaler=None, debug=0):
     # Check if flow exists in sig_map
     if key in sig_map:
         state = sig_map[key]
+        # print("Key in sigmap\n")
         
         # Check if flow is ready for classification or has timed out
         # if state.value == STATE_READY or (current_time - flow.last_seen > FLOW_TIMEOUT):
@@ -221,7 +214,7 @@ def process_flow(key, flow, bpf_tables, model, scaler=None, debug=0):
             if model is not None:
                 try:
                     # Preprocess flow data
-                    input_features = preprocess_flow(flow, scaler, debug)
+                    input_features = preprocess_flow(key, flow, scaler, debug)
                     
                     # Need to temporarily set the model to evaluation mode but with no tracking
                     with torch.no_grad():
@@ -247,30 +240,18 @@ def process_flow(key, flow, bpf_tables, model, scaler=None, debug=0):
                 print("Model not available, using default classification")
                 new_state = STATE_MALICIOUS
             
-            # Update the state in sig_map
-            sig_map.items_update_batch(
-                (ctypes.c_uint32 * 1)(key),
-                (ctypes.c_uint32 * 1)(new_state)
-            )
-
-            # Delete flow from all hash function maps
-            flowkey_bytes = pack_flow_key(flow)
+            sig_map[key] = ctypes.c_uint32(new_state)
             
-            # Clean up all tables
-            for i, seed in enumerate(MAP_SEEDS):
-                hashed_key = jhash(flowkey_bytes, seed)
-                hash_table = bpf_tables[f"hash_func_{i+1}"]
-                try:
-                    hash_table.items_delete_batch((ctypes.c_uint32 * 1)(hashed_key))
-                    if i == 0 and debug:  # Only print for the first hash map
-                        print(f"Deleting flow from hash tables with key: {hashed_key}\n\n")
-                except Exception:
-                    continue
+            # Clean up table (flow_map)
+            flow_map = bpf_tables[f"flow_map"]
             try:
-                # Remove from aggregation map
-                bpf_tables["aggr"].items_delete_batch((ctypes.c_uint32 * 1)(key))
+                # flow_map.items_delete_batch([key])
+                del flow_map[key]
+                if debug:
+                    print(f"Deleting flow from hash tables with key: {key}\n\n")
             except Exception:
-                    pass
+                print("Could not delete key")
+                pass
     else:
         print(f"Flow key {key} not found in sig_map")
 
@@ -301,14 +282,9 @@ def main():
     
     # Get all the BPF maps
     bpf_tables = {
-        "hash_func_1": bpf.get_table("hash_func_1"),
-        "hash_func_2": bpf.get_table("hash_func_2"),
-        "hash_func_3": bpf.get_table("hash_func_3"),
-        "hash_func_4": bpf.get_table("hash_func_4"),
-        "hash_func_5": bpf.get_table("hash_func_5"),
         "passed_packets": bpf.get_table("passed_packets"),
         "sig_map": bpf.get_table("sig_map"),
-        "aggr": bpf.get_table("aggr"),
+        "flow_map": bpf.get_table("flow_map"),
     }
         
     try:
@@ -317,11 +293,11 @@ def main():
         # Main processing loop
         while True:
             # Refresh the aggregation map (it might have been updated by the eBPF program)
-            bpf_tables["aggr"] = bpf.get_table("aggr")
-            aggr_items = bpf_tables["aggr"].items()
+            bpf_tables["flow_map"] = bpf.get_table("flow_map")
+            flow_map_items = bpf_tables["flow_map"].items()
             
-            if aggr_items:
-                for key, flow in aggr_items:
+            if flow_map_items:
+                for key, flow in flow_map_items:
                     # Uncomment to debug flow details
                     # if args.debug:
                     #     print_flow_info(flow)
@@ -329,18 +305,6 @@ def main():
                     
             # Sleep briefly to avoid CPU hogging 
             # time.sleep(0.1)
-
-        # Main processing loop
-        # while True:
-        #     # Refresh the aggregation map (it might have been updated by the eBPF program)
-        #     bpf_tables["hash_func_1"] = bpf.get_table("hash_func_1")
-        #     hash_func_1_items = bpf_tables["hash_func_1"].items()
-            
-        #     if hash_func_1_items:
-        #         for key, flow in hash_func_1_items:
-                    
-        #             process_flow(key, flow, bpf_tables, model, scaler, args.debug)
-
             
     except KeyboardInterrupt:
         print("\nShutting down...")

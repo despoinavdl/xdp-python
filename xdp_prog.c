@@ -1,8 +1,3 @@
-// This eBPF/XDP program implements a Count-Min Sketch (CMS) data structure
-// to track network flow statistics/features with multiple hash functions for accuracy.
-// It monitors packet flows and can classify them as malicious or benign with the help
-// of a userspace program.
-
 #include <linux/types.h>
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
@@ -17,42 +12,22 @@
 #define UINT64_MAX (~0ULL) // Maximum value for 64-bit unsigned integer
 #define UINT32_MAX (~0U)   // Maximum value for 32-bit unsigned integer
 
-// Hash maps for count min sketch (CMS)
-// Each map uses a different hash function for the same key to minimize collisions
-BPF_HASH(hash_func_1, u32, struct flow_info, XDP_MAX_MAP_ENTRIES);
-BPF_HASH(hash_func_2, u32, struct flow_info, XDP_MAX_MAP_ENTRIES);
-BPF_HASH(hash_func_3, u32, struct flow_info, XDP_MAX_MAP_ENTRIES);
-BPF_HASH(hash_func_4, u32, struct flow_info, XDP_MAX_MAP_ENTRIES);
-BPF_HASH(hash_func_5, u32, struct flow_info, XDP_MAX_MAP_ENTRIES);
-
-// Map for aggregated results from CMS for userspace access
-BPF_HASH(aggr, u32, struct flow_info, XDP_MAX_MAP_ENTRIES);
+BPF_HASH(flow_map, struct flow_key, struct flow_info, XDP_MAX_MAP_ENTRIES);
 
 // Counter for packets that passed through XDP
 BPF_HASH(passed_packets, u32, struct datarec, 1);
 
 // Map for tracking flow states (Waiting, Ready, Malicious, Benign)
-BPF_TABLE("lru_hash", u32, enum states, sig_map, 400000);
-
-// Structure to hold hash keys and seeds (moved from stack to avoid stack size limitations)
-struct hash_info {
-    u32 hashed_keys[NUM_HASH_FUNCTIONS];
-    u32 map_seeds[NUM_HASH_FUNCTIONS];
-};
-
-// Per-CPU array to store hash state
-BPF_PERCPU_ARRAY(hash_info_map, struct hash_info, 1);
-
+BPF_TABLE("lru_hash", struct flow_key, enum states, sig_map, 400000);
 
 /* Updates the packet counter for packets that pass through XDP */
 static __always_inline void update_passed_packets(void)
 {
     u32 zero = 0;
-    struct datarec *rec = {0};
+    // struct datarec *rec = {0};
     struct datarec new_rec = {.packets = 1};
-    int ret;
 
-    rec = (struct datarec *)passed_packets.lookup(&zero);
+    struct datarec *rec = (struct datarec *)passed_packets.lookup(&zero);
     if (!rec)
     {
         // First entry - initialize the counter
@@ -63,7 +38,6 @@ static __always_inline void update_passed_packets(void)
     lock_xadd(&rec->packets, 1);
 }
 
-
 /* Updates a Count-Min Sketch hash map with flow information
  * map_flag: Index of the hash map to update (1-5)
  * key: Hashed flow key
@@ -71,7 +45,7 @@ static __always_inline void update_passed_packets(void)
  * aggregated: Pointer to store aggregated min values
  * return 0 on success, -1 on error
  */
-static __always_inline int update_map(u8 map_flag, u32 key, struct flow_info info, struct flow_info *aggregated)
+static __always_inline int update_map(struct flow_key key, struct flow_info info)
 {
     struct flow_info *rec;
     int ret;
@@ -79,38 +53,12 @@ static __always_inline int update_map(u8 map_flag, u32 key, struct flow_info inf
     u64 last_seen_old;
     u64 iat_mean_old;
 
-    // Select the appropriate map based on map_flag
-    switch (map_flag) {
-        case 1: rec = (struct flow_info *)hash_func_1.lookup(&key); break;
-        case 2: rec = (struct flow_info *)hash_func_2.lookup(&key); break;
-        case 3: rec = (struct flow_info *)hash_func_3.lookup(&key); break;
-        case 4: rec = (struct flow_info *)hash_func_4.lookup(&key); break;
-        case 5: rec = (struct flow_info *)hash_func_5.lookup(&key); break;
-        default: return -1;
-    }
+    rec = (struct flow_info *)flow_map.lookup(&key);
 
     // If entry doesn't exist yet, initialize it
     if (!rec) {
-        // Insert new entry into the appropriate map
-        switch (map_flag) {
-            case 1: hash_func_1.update(&key, &info); break;
-            case 2: hash_func_2.update(&key, &info); break;
-            case 3: hash_func_3.update(&key, &info); break;
-            case 4: hash_func_4.update(&key, &info); break;
-            case 5: hash_func_5.update(&key, &info); break;
-            default: return -1;
-        }
-
-        // Copy initial values to aggregated output
-        aggregated->packets = info.packets;
-        aggregated->bytes = info.bytes;
-        aggregated->first_seen = info.first_seen;
-        aggregated->last_seen = info.last_seen;
-        aggregated->duration = info.duration;
-        aggregated->pps = info.pps;
-        aggregated->bps = info.bps;
-        aggregated->iat_mean = info.iat_mean;
-
+        // Insert new entry 
+        flow_map.update(&key, &info);
         return 0;
     }
 
@@ -146,37 +94,13 @@ static __always_inline int update_map(u8 map_flag, u32 key, struct flow_info inf
         }
     }
 
-    rec->iat_mean = ((iat_mean_old * packets_old) + rec->last_seen - last_seen_old) / rec->packets;
-
+    if (rec->packets > 0) {
+        rec->iat_mean = ((iat_mean_old * packets_old) + rec->last_seen - last_seen_old) / rec->packets;
+    }
 
     bpf_spin_unlock(&rec->lock);  // Release lock
 
-    // Update aggregated values using the CMS minimum values
-    // The CMS approach takes the minimum value across all hash functions
-    // for each metric to get the most accurate estimate
-    if (rec->packets < aggregated->packets)
-        aggregated->packets = rec->packets;
-
-    if (rec->bytes < aggregated->bytes)
-        aggregated->bytes = rec->bytes;
-
-    if (rec->first_seen > aggregated->first_seen)
-        aggregated->first_seen = rec->first_seen;
-
-    if (rec->last_seen < aggregated->last_seen)
-        aggregated->last_seen = rec->last_seen;
-
-    if (rec->duration < aggregated->duration)
-        aggregated->duration = rec->duration;
-
-    if (rec->pps < aggregated->pps)
-        aggregated->pps = rec->pps;
-
-    if (rec->bps < aggregated->bps)
-        aggregated->bps = rec->bps;
-
-    if (rec->iat_mean > aggregated->iat_mean)
-        aggregated->iat_mean = rec->iat_mean;
+    // flow_map.update(&key, rec); not needed since pointer is being updated
 
     return 0;
 }
@@ -192,7 +116,7 @@ static __always_inline int update_map(u8 map_flag, u32 key, struct flow_info inf
  * This function:
  * 1. Parses the packet to extract flow information
  * 2. Checks if flow is already classified as malicious/benign
- * 3. Updates the Count-Min Sketch with flow statistics
+ * 3. Updates the flow_map with flow statistics
  * 4. Decides whether to pass or drop the packet
  * 
  * ctx: XDP context containing packet data
@@ -201,19 +125,6 @@ static __always_inline int update_map(u8 map_flag, u32 key, struct flow_info inf
 
 int packet_handler(struct xdp_md *ctx)
 {
-    u32 zero = 0;
-    struct hash_info empty = {0}; // Initialize with zeros
-    struct hash_info *hash_inf = hash_info_map.lookup_or_try_init(&zero, &empty);
-    if (!hash_inf)
-        return XDP_ABORTED;
-
-    // Initialize hash function seeds
-    hash_inf->map_seeds[0] = HASH_FUNC_1_SEED;
-    hash_inf->map_seeds[1] = HASH_FUNC_2_SEED;
-    hash_inf->map_seeds[2] = HASH_FUNC_3_SEED;
-    hash_inf->map_seeds[3] = HASH_FUNC_4_SEED;
-    hash_inf->map_seeds[4] = HASH_FUNC_5_SEED;
-
     // Access packet data
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
@@ -233,9 +144,9 @@ int packet_handler(struct xdp_md *ctx)
     // Only process IPv4 packets
     if (ntohs(eth->h_proto) != ETH_P_IP) {
         return XDP_DROP;
-        update_passed_packets();
-        printk("EtherType: 0x%x\n", ntohs(eth->h_proto));
-        return XDP_PASS;
+        // update_passed_packets();
+        // printk("EtherType: 0x%x\n", ntohs(eth->h_proto));
+        // return XDP_PASS;
     }
 
     // Extract IP addresses and protocol
@@ -280,13 +191,13 @@ int packet_handler(struct xdp_md *ctx)
         key.src_port = 0;
         key.dst_port = 0;
     }
-
-    // Check if this flow has already been classified
-    u32 state_key = jhash(&key, sizeof(key), STATE_HASH_SEED);
-    enum states *state_ptr = sig_map.lookup(&state_key);
-
-    // Take immediate action based on existing classification
+    
     enum states state = Waiting;
+
+    // Retrieve flow state 
+    enum states *state_ptr = sig_map.lookup(&key);
+
+    // Take action based on existing classification
     if (state_ptr) {
         state = *state_ptr;
         if (state == Malicious) {
@@ -295,17 +206,14 @@ int packet_handler(struct xdp_md *ctx)
             update_passed_packets();
             return XDP_PASS; // Pass benign flows
         }
+    } else {
+        sig_map.update(&key, &state);
     }
 
     // Set initial state if not already classified
-    sig_map.update(&state_key, &state);
+    // sig_map.update(&key, &state);
 
     // Initialize flow info structure with packet details
-    info.src_ip = key.src_ip;
-    info.dst_ip = key.dst_ip;
-    info.src_port = key.src_port;
-    info.dst_port = key.dst_port;
-    info.protocol = key.protocol;
     info.packets = 1;
     info.bytes = size;
     info.first_seen = bpf_ktime_get_ns();
@@ -315,49 +223,20 @@ int packet_handler(struct xdp_md *ctx)
     info.bps = 0;
     info.iat_mean = 0;
 
-    // Compute key hash values for each map
-    for (int i = 0; i < NUM_HASH_FUNCTIONS; i++)
-    {
-        hash_inf->hashed_keys[i] = jhash(&key, sizeof(key), hash_inf->map_seeds[i]);
-    }
+    // Update flow_map
+    update_map(key, info);
 
-    // Initialize aggregated flow info structure
-    // Set to maximum values so that minimum operations will work correctly
-    struct flow_info agg = {0};
-    agg.src_ip = key.src_ip;
-    agg.dst_ip = key.dst_ip;
-    agg.src_port = key.src_port;
-    agg.dst_port = key.dst_port;
-    agg.protocol = key.protocol;
-    agg.packets = UINT32_MAX;
-    agg.bytes = UINT64_MAX;
-    agg.first_seen = 0;
-    agg.last_seen = UINT64_MAX;
-    agg.duration = UINT64_MAX;
-    agg.pps = UINT32_MAX;
-    agg.bps = UINT32_MAX;
-    agg.iat_mean = 0;
+    // bpf_trace_printk("flow packets: %u, PACKETS_SAMPLE: %d\n", agg.packets, PACKETS_SAMPLE);
 
-    // Update each CMS hash map & the aggr map
-    update_map(1, hash_inf->hashed_keys[0], info, &agg);
-    update_map(2, hash_inf->hashed_keys[1], info, &agg);
-    update_map(3, hash_inf->hashed_keys[2], info, &agg);
-    update_map(4, hash_inf->hashed_keys[3], info, &agg);
-    update_map(5, hash_inf->hashed_keys[4], info, &agg);
-
-    // Add aggregated flow info to aggr map
-    u32 aggr_key = jhash(&key, sizeof(key), AGGR_HASH_SEED);
-    aggr.update(&aggr_key, &agg);
-
-    bpf_trace_printk("flow packets: %u, PACKETS_SAMPLE: %d\n", agg.packets, PACKETS_SAMPLE);
-
+    // Lookup can be avoided if update_map returns packet count
+    struct flow_info *updated_flow = flow_map.lookup(&key);
+    
     // Check if we've collected enough samples to make a decision (flow timeout?)
-    if (agg.packets >= PACKETS_SAMPLE && state == Waiting) // || ((current_time - agg.last_seen) > FLOW_TIMEOUT))
+    if (updated_flow && updated_flow->packets >= PACKETS_SAMPLE && state == Waiting) // || ((current_time - agg.last_seen) > FLOW_TIMEOUT))
     {
         // Change the state in sig_map to Ready
         state = Ready;
-        sig_map.update(&state_key, &state);
-
+        sig_map.update(&key, &state);
     }
 
     // Increment the counter value for passed packets
