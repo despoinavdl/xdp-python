@@ -15,8 +15,8 @@ import argparse
 import socket
 import time
 import ctypes
+import csv
 import os
-import struct
 
 from MLP import *
 from jhash import jhash  # Custom jhash implementation
@@ -56,17 +56,17 @@ def get_protocol_name(protocol):
     }
     return protocols.get(protocol, f"Unknown ({protocol})")
 
-def print_flow_info(flow):
+def print_flow_info(key, flow):
     """Display formatted flow information"""
-    src_ip_str = socket.inet_ntoa(flow.src_ip.to_bytes(4, 'little'))
-    dst_ip_str = socket.inet_ntoa(flow.dst_ip.to_bytes(4, 'little'))
+    src_ip_str = socket.inet_ntoa(key.src_ip.to_bytes(4, 'little'))
+    dst_ip_str = socket.inet_ntoa(key.dst_ip.to_bytes(4, 'little'))
     
     print("-------------------------------")
     print(f"Source IP:       {src_ip_str}")
     print(f"Destination IP:  {dst_ip_str}")
-    print(f"Source Port:     {flow.src_port}")
-    print(f"Destination Port:{flow.dst_port}")
-    print(f"Protocol:        {get_protocol_name(flow.protocol)}")
+    print(f"Source Port:     {socket.ntohs(key.src_port)}")
+    print(f"Destination Port:{socket.ntohs(key.dst_port)}")
+    print(f"Protocol:        {get_protocol_name(key.protocol)}")
     print(f"Packets:         {flow.packets}")
     print(f"Bytes:           {flow.bytes}")
     print(f"First Seen:      {flow.first_seen}")
@@ -76,6 +76,43 @@ def print_flow_info(flow):
     print(f"BPS:             {flow.bps}")
     print(f"IAT:             {flow.iat_mean}")
     print("-------------------------------")
+
+    # # Define output file
+    # file_path = "malicious_flows.csv"
+
+    # # Define headers for the CSV file
+    # headers = ["Protocol", "SrcIP", "SrcPort", "DstIP", "DstPort"]
+    # protocol_name = get_protocol_name(key.protocol)
+
+    # # Prepare current row as a list of strings
+    # # print(f"DEBUGGING PORT INT: {key.dst_port}\nPORT STR: {str(key.dst_port)}")
+    # # print(f"TEST SRC: {socket.ntohs(key.src_port)}, DST: {socket.ntohs(key.dst_port)}")
+    # current_row = [
+    #     protocol_name,
+    #     src_ip_str,
+    #     str(socket.ntohs(key.src_port)),
+    #     dst_ip_str,
+    #     str(socket.ntohs(key.dst_port))
+    # ]
+
+    # # Check line-by-line in file for a matching row
+    # already_exists = False
+    # if os.path.isfile(file_path):
+    #     with open(file_path, mode="r", newline="") as f:
+    #         reader = csv.reader(f)
+    #         for row in reader:
+    #             if row == current_row:
+    #                 already_exists = True
+    #                 break
+
+    # # Append row only if it doesn't already exist
+    # if not already_exists:
+    #     file_empty = not os.path.isfile(file_path) or os.path.getsize(file_path) == 0
+    #     with open(file_path, mode="a", newline="") as f:
+    #         writer = csv.writer(f)
+    #         if file_empty:
+    #             writer.writerow(headers)
+    #         writer.writerow(current_row)
 
 # Function to load the model
 def load_model(model_path="best_mlp_model.pt"):
@@ -154,10 +191,10 @@ def preprocess_flow(key, flow, scaler=None, debug=0):
     # print("-" * 23)
     ##################################
 
-
+    # UNCOMMENT TO APPLY SCALER
     # Apply the same scaling as during training to numerical features only
-    if scaler is not None:
-        numerical_features = scaler.transform(numerical_features.reshape(1, -1)).flatten()
+    # if scaler is not None:
+    #     numerical_features = scaler.transform(numerical_features.reshape(1, -1)).flatten()
     
     # Combine categorical and numerical features
     features = np.hstack([categorical_features, numerical_features])
@@ -169,9 +206,26 @@ def preprocess_flow(key, flow, scaler=None, debug=0):
             'Fwd Packets Length Total', 'Flow Bytes/s', 'Flow Packets/s', 'Flow IAT Mean'
         ]
         # print("=== INFERENCE INPUT ===")
-        print("AFTER SCALING:")
+        # print("AFTER SCALING:")
         for name, value in zip(feature_names, features):
             print(f"{name}: {value}")
+
+        file_path = "features.csv"
+        # Does the file already exist?
+        file_exists = os.path.isfile(file_path)
+
+        # Open file in append mode
+        with open(file_path, mode="a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=feature_names)
+
+            # Write header only once (when file is created)
+            if not file_exists:
+                writer.writeheader()
+
+            # Write one row of features
+            row = dict(zip(feature_names, features))
+            writer.writerow(row)
+
         print("===================================")
 
    # Convert to PyTorch tensor
@@ -299,8 +353,8 @@ def main():
             if flow_map_items:
                 for key, flow in flow_map_items:
                     # Uncomment to debug flow details
-                    # if args.debug:
-                    #     print_flow_info(flow)
+                    if args.debug:
+                        print_flow_info(key, flow)
                     process_flow(key, flow, bpf_tables, model, scaler, args.debug)
                     
             # Sleep briefly to avoid CPU hogging 
