@@ -22,8 +22,12 @@ from MLP import *
 from jhash import jhash  # Custom jhash implementation
 
 # Constants
-# FLOW_TIMEOUT = 5_000_000_000  # 5 seconds timeout in nanoseconds
-# FLOW_TIMEOUT = 50000000000  # 50 seconds timeout in nanoseconds
+#define XDP_MAX_MAP_ENTRIES 1024000 in flow_headers.h
+XDP_MAX_MAP_ENTRIES = 1024000
+# XDP_MAX_MAP_ENTRIES = 10
+FLOW_TIMEOUT = 30_000_000_000  # 30 seconds timeout in nanoseconds
+MAX_FLOWS_THRESHOLD = int(XDP_MAX_MAP_ENTRIES * 0.8)  # Clean when 80% full
+CLEANUP_BATCH_SIZE = 10000  # Clean up this many flows at once
 # FLOW_TIMEOUT = 100_000_000_000_000  # 100 seconds timeout in nanoseconds for testing
 MAP_SEEDS = [17, 53, 97, 193, 389]  # Hash function seeds matching the eBPF program
 
@@ -55,6 +59,68 @@ def get_protocol_name(protocol):
         17: "UDP"
     }
     return protocols.get(protocol, f"Unknown ({protocol})")
+
+
+def get_flow_map_usage(flow_map_items):
+    """Get current usage statistics of the flow map"""
+    try:
+        current_entries = len(list(flow_map_items))
+        usage_percent = (current_entries / XDP_MAX_MAP_ENTRIES) * 100
+        return current_entries, usage_percent
+    except:
+        return 0, 0.0
+
+def cleanup_old_flows(bpf_tables, debug=0):
+    """
+    Cleanup old/stale flows from the flow_map to prevent it from getting full
+    """
+    current_time = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+    flow_map = bpf_tables["flow_map"]
+    sig_map = bpf_tables["sig_map"]
+    
+    flows_cleaned = 0
+    current_entries, usage_percent = get_flow_map_usage(flow_map.items())
+    if debug:
+        print(f"Flow map usage: {current_entries}/{XDP_MAX_MAP_ENTRIES} ({usage_percent:.1f}%)")
+    
+    try:
+        # Get all flows
+        for key, flow in flow_map.items():
+            # Check if flow is too old (hasn't been seen recently)
+            print(f"Checking current time: {current_time} - flow last seen: {flow.last_seen}")
+            if (current_time - flow.last_seen) > FLOW_TIMEOUT:
+                
+                # Delete from flow_map
+                if key in flow_map:
+                    try:
+                        del flow_map[key]
+                        print(f"In cleanup flows, deleting from flow map {key}")
+                    except:
+                        pass  # Key might have been deleted by another process
+
+                # Also clean from sig_map
+                if key in sig_map:
+                    try:
+                        del sig_map[key]
+                        print(f"In cleanup flows, deleting key from sig map: {key.src_ip} \
+                              {key.dst_ip} {key.src_port} {key.dst_port} {key.protocol}")
+                    except:
+                        pass
+                
+                flows_cleaned += 1
+                
+                # Limit batch size to avoid holding locks too long
+                if flows_cleaned >= CLEANUP_BATCH_SIZE:
+                    break
+                
+        if debug and flows_cleaned > 0:
+            print(f"Cleaned up {flows_cleaned} old flows")
+            
+    except Exception as e:
+        print(f"Error during flow cleanup: {e}")
+    
+    return flows_cleaned
+
 
 def print_flow_info(key, flow):
     """Display formatted flow information"""
@@ -203,14 +269,15 @@ def preprocess_flow(key, flow, scaler=None, debug=0):
     if debug:
         feature_names = [
             'Protocol', 'Flow Duration', 'Total Fwd Packets',
-            'Fwd Packets Length Total', 'Flow Bytes/s', 'Flow Packets/s', 'Flow IAT Mean'
+            'Fwd Packets Length Total', 'Flow Bytes/s', 'Flow Packets/s', 'Flow IAT Mean',
+            'Label'
         ]
         # print("=== INFERENCE INPUT ===")
         # print("AFTER SCALING:")
         for name, value in zip(feature_names, features):
             print(f"{name}: {value}")
 
-        file_path = "features.csv"
+        file_path = "features/features.csv"
         # Does the file already exist?
         file_exists = os.path.isfile(file_path)
 
@@ -224,6 +291,7 @@ def preprocess_flow(key, flow, scaler=None, debug=0):
 
             # Write one row of features
             row = dict(zip(feature_names, features))
+            row['Label'] = 'Benign'
             writer.writerow(row)
 
         print("===================================")
@@ -308,6 +376,7 @@ def process_flow(key, flow, bpf_tables, model, scaler=None, debug=0):
                 pass
     else:
         print(f"Flow key {key} not found in sig_map")
+        print(f"{key.src_ip} {key.dst_ip} {key.src_port} {key.dst_port} {key.protocol}")
 
 def main():
     """Main function to load and run the eBPF program"""
@@ -350,11 +419,22 @@ def main():
             bpf_tables["flow_map"] = bpf.get_table("flow_map")
             flow_map_items = bpf_tables["flow_map"].items()
             
+            current_entries, usage_percent = get_flow_map_usage(flow_map_items)
+            
+            # Cleanup old flows periodically or when map is getting full
+            should_cleanup = current_entries > MAX_FLOWS_THRESHOLD
+            
+            if should_cleanup:
+                flows_cleaned = cleanup_old_flows(bpf_tables, args.debug)
+                
+                if usage_percent > 90 and args.debug:
+                    print(f"WARNING: Flow map is {usage_percent:.1f}% full!")
+
             if flow_map_items:
                 for key, flow in flow_map_items:
                     # Uncomment to debug flow details
-                    if args.debug:
-                        print_flow_info(key, flow)
+                    # if args.debug:
+                    #     print_flow_info(key, flow)
                     process_flow(key, flow, bpf_tables, model, scaler, args.debug)
                     
             # Sleep briefly to avoid CPU hogging 

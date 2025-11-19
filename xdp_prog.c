@@ -38,11 +38,9 @@ static __always_inline void update_passed_packets(void)
     lock_xadd(&rec->packets, 1);
 }
 
-/* Updates a Count-Min Sketch hash map with flow information
- * map_flag: Index of the hash map to update (1-5)
+/* Updates a hash map with flow information
  * key: Hashed flow key
  * info: Flow information to store/update
- * aggregated: Pointer to store aggregated min values
  * return 0 on success, -1 on error
  */
 static __always_inline int update_map(struct flow_key key, struct flow_info info)
@@ -231,7 +229,7 @@ int packet_handler(struct xdp_md *ctx)
     // Lookup can be avoided if update_map returns packet count
     struct flow_info *updated_flow = flow_map.lookup(&key);
     
-    // Check if we've collected enough samples to make a decision (flow timeout?)
+    // Check if we've collected enough samples to make a decision (flow timeout? -> userspace)
     if (updated_flow && updated_flow->packets >= PACKETS_SAMPLE && state == Waiting) // || ((current_time - agg.last_seen) > FLOW_TIMEOUT))
     {
         // Change the state in sig_map to Ready
