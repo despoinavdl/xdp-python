@@ -33,6 +33,9 @@ struct flow_info
     volatile __u32 pps;
     volatile __u32 bps;
     volatile __u64 iat_mean; // mean inter arrival time between packets of a flow
+    volatile __u64 iat_total;
+    volatile __u64 iat_min;
+    volatile __u64 iat_max;
     struct bpf_spin_lock lock;
 };
 

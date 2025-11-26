@@ -140,7 +140,10 @@ def print_flow_info(key, flow):
     print(f"Duration:        {flow.duration}")
     print(f"PPS:             {flow.pps / 10:.1f}")  # Adjust for decimal point
     print(f"BPS:             {flow.bps}")
-    print(f"IAT:             {flow.iat_mean}")
+    print(f"IAT MEAN:        {flow.iat_mean}")
+    print(f"IAT TOTAL:       {flow.iat_total}")
+    print(f"IAT MIN:         {flow.iat_min}")
+    print(f"IAT MAX:         {flow.iat_max}")
     print("-------------------------------")
 
     # # Define output file
@@ -239,7 +242,10 @@ def preprocess_flow(key, flow, scaler=None, debug=0):
         flow.bytes,                     # Fwd Packets Length Total
         flow.bps,                       # Flow Bytes/s
         flow.pps / 10,                  # Flow Packets/s (adjusted)
-        flow.iat_mean / 1000000         # Flow IAT Mean (unit in dataset?)
+        flow.iat_mean / 1000000000,        # Flow IAT Mean (unit in dataset?)
+        flow.iat_total / 1000000000,
+        flow.iat_min / 1000000000,
+        flow.iat_max / 1000000000
     ], dtype=np.float32)
     
 
@@ -270,6 +276,7 @@ def preprocess_flow(key, flow, scaler=None, debug=0):
         feature_names = [
             'Protocol', 'Flow Duration', 'Total Fwd Packets',
             'Fwd Packets Length Total', 'Flow Bytes/s', 'Flow Packets/s', 'Flow IAT Mean',
+            'Flow IAT Total', 'Flow IAT Min', 'Flow IAT Max',
             'Label'
         ]
         # print("=== INFERENCE INPUT ===")

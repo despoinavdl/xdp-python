@@ -50,6 +50,10 @@ static __always_inline int update_map(struct flow_key key, struct flow_info info
     u32 packets_old;
     u64 last_seen_old;
     u64 iat_mean_old;
+    u64 iat_total_old;
+    u64 iat_min_old;
+    u64 iat_max_old;
+    u64 iat;
 
     rec = (struct flow_info *)flow_map.lookup(&key);
 
@@ -68,32 +72,39 @@ static __always_inline int update_map(struct flow_key key, struct flow_info info
     packets_old = rec->packets;
     last_seen_old = rec->last_seen;
     iat_mean_old = rec->iat_mean;
+    iat_total_old = rec->iat_total;
+    iat_min_old = rec->iat_min;
+    iat_max_old = rec->iat_max;
 
+    // Update last_seen and calculate duration, IAT
+    if (rec->last_seen < info.last_seen) {
+        rec->last_seen = info.last_seen;
+        rec->duration = rec->last_seen - rec->first_seen;
+        
+        // IAT Calculation
+        if (packets_old > 0) {
+            iat = rec->last_seen - last_seen_old;
+            rec->iat_total = iat_total_old + iat;
+            rec->iat_mean = (iat_total_old + iat) / packets_old;
+            if(iat_min_old > iat) rec->iat_min = iat;
+            if(iat_max_old < iat) rec->iat_max = iat;
+        }
+    }
+    
     // Update packet and byte counters, if this packet is newer than what we've seen
     rec->packets += info.packets;
     rec->bytes += info.bytes;
 
-    // Update last_seen and calculate duration
-    if (rec->last_seen < info.last_seen) {
-
-        rec->last_seen = info.last_seen;
-        rec->duration = rec->last_seen - rec->first_seen;
-
-        // Calculate rates if we have valid duration
-        if (rec->duration >= 1000000000) { //if duration >= 1 second
-            // Packets per second with 1 decimal point accuracy (2.3pps -> 23 pps)
-            rec->pps = (rec->packets * 10000000000) / rec->duration;
-            // Bytes per second with no decimal point accuracy
-            rec->bps = (rec->bytes * 1000000000) / rec->duration;
-        }
-        else {
-            rec->pps = rec->packets;
-            rec->bps = rec->bytes;
-        }
+    // Calculate rates if we have valid duration
+    if (rec->duration >= 1000000000) { //if duration >= 1 second
+        // Packets per second with 1 decimal point accuracy (2.3pps -> 23 pps)
+        rec->pps = (rec->packets * 10000000000) / rec->duration;
+        // Bytes per second with no decimal point accuracy
+        rec->bps = (rec->bytes * 1000000000) / rec->duration;
     }
-
-    if (rec->packets > 0) {
-        rec->iat_mean = ((iat_mean_old * packets_old) + rec->last_seen - last_seen_old) / rec->packets;
+    else {
+        rec->pps = rec->packets;
+        rec->bps = rec->bytes;
     }
 
     bpf_spin_unlock(&rec->lock);  // Release lock
@@ -220,6 +231,9 @@ int packet_handler(struct xdp_md *ctx)
     info.pps = 0;
     info.bps = 0;
     info.iat_mean = 0;
+    info.iat_total = 0;
+    info.iat_min = UINT64_MAX;
+    info.iat_max = 0;
 
     // Update flow_map
     update_map(key, info);
