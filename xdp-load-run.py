@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-BCC Python Program for Count-Min Sketch Flow Monitoring
+BCC Python Program for Flow Monitoring
 
-This program loads and manages an eBPF/XDP program that implements a Count-Min Sketch
-for network flow monitoring. It periodically checks flows and makes decisions about
+This program loads and manages an eBPF/XDP program for network flow monitoring. 
+It periodically checks flows and makes decisions about
 whether they are malicious or benign.
 """
 import joblib
@@ -416,6 +416,8 @@ def main():
         "sig_map": bpf.get_table("sig_map"),
         "flow_map": bpf.get_table("flow_map"),
     }
+
+
         
     try:
         print("Flow monitor running. Press Ctrl+C to exit.")
