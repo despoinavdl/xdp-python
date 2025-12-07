@@ -1,4 +1,8 @@
 #define PACKETS_SAMPLE 10
+#define MAX_DEPTH 10
+#define TREE_1_NODES 257
+#define TREE_2_NODES 259
+#define TREE_3_NODES 287
 
 #ifndef lock_xadd
 #define lock_xadd(ptr, val) ((void)__sync_fetch_and_add(ptr, val))
@@ -30,7 +34,7 @@ struct flow_info
     __u64 first_seen;
     volatile __u64 last_seen;
     volatile __u64 duration;
-    volatile __u32 pps;
+    volatile __u64 pps;
     volatile __u32 bps;
     volatile __u64 iat_mean; // mean inter arrival time between packets of a flow
     volatile __u64 iat_total;

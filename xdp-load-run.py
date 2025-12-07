@@ -51,6 +51,52 @@ def parse_arguments():
     
     return parser.parse_args()
 
+def load_decision_trees(b, debug=0):
+    """Load all 3 decision trees from their respective folders"""
+    
+    # Define the map names for each tree
+    map_names = ['children_left', 'children_right', 'features', 'thresholds', 'values']
+    tree_folders = ['decision-tree1', 'decision-tree2', 'decision-tree3']
+    for tree_num, folder in enumerate(tree_folders, 1):
+        if debug:
+            print(f"\n=== Loading Decision Tree {tree_num} from {folder}/ ===")
+        
+        # Check if folder exists
+        if not os.path.exists(folder):
+            print(f"Warning: Folder {folder} not found, skipping tree {tree_num}")
+            continue
+            
+        for map_name in map_names:
+            # Construct the BPF map name (e.g., "children_left1")
+            bpf_map_name = f"{map_name}{tree_num}"
+            file_path = os.path.join(folder, map_name)
+            
+            try:
+                # Get map reference
+                bpf_map = b.get_table(bpf_map_name)
+                
+                # Read values from file
+                with open(file_path, 'r') as f:
+                    values = [int(line.strip()) for line in f if line.strip()]
+                
+                # Update map with values from file
+                for i, val in enumerate(values):
+                    if i < bpf_map.max_entries:
+                        bpf_map[ctypes.c_uint(i)] = ctypes.c_int64(val)
+                        # print(f"Set {bpf_map_name}[{i}] = {val}")
+                    else:
+                        print(f"Warning: More values in {file_path} than map size")
+                        break
+                
+                if debug:
+                    print(f"Loaded {len(values)} values into {bpf_map_name} from {file_path}")
+                
+            except FileNotFoundError:
+                print(f"Error: File {file_path} not found")
+            except Exception as e:
+                print(f"Error loading {bpf_map_name}: {e}")
+    print(f"Loading Decision Trees")
+
 def get_protocol_name(protocol):
     """Convert protocol number to human-readable name"""
     protocols = {
@@ -146,43 +192,6 @@ def print_flow_info(key, flow):
     print(f"IAT MAX:         {flow.iat_max}")
     print("-------------------------------")
 
-    # # Define output file
-    # file_path = "malicious_flows.csv"
-
-    # # Define headers for the CSV file
-    # headers = ["Protocol", "SrcIP", "SrcPort", "DstIP", "DstPort"]
-    # protocol_name = get_protocol_name(key.protocol)
-
-    # # Prepare current row as a list of strings
-    # # print(f"DEBUGGING PORT INT: {key.dst_port}\nPORT STR: {str(key.dst_port)}")
-    # # print(f"TEST SRC: {socket.ntohs(key.src_port)}, DST: {socket.ntohs(key.dst_port)}")
-    # current_row = [
-    #     protocol_name,
-    #     src_ip_str,
-    #     str(socket.ntohs(key.src_port)),
-    #     dst_ip_str,
-    #     str(socket.ntohs(key.dst_port))
-    # ]
-
-    # # Check line-by-line in file for a matching row
-    # already_exists = False
-    # if os.path.isfile(file_path):
-    #     with open(file_path, mode="r", newline="") as f:
-    #         reader = csv.reader(f)
-    #         for row in reader:
-    #             if row == current_row:
-    #                 already_exists = True
-    #                 break
-
-    # # Append row only if it doesn't already exist
-    # if not already_exists:
-    #     file_empty = not os.path.isfile(file_path) or os.path.getsize(file_path) == 0
-    #     with open(file_path, mode="a", newline="") as f:
-    #         writer = csv.writer(f)
-    #         if file_empty:
-    #             writer.writerow(headers)
-    #         writer.writerow(current_row)
-
 # Function to load the model
 def load_model(model_path="best_mlp_model.pt"):
     """
@@ -228,7 +237,7 @@ def load_scaler(scaler_path="feature_scaler.joblib"):
         return None
 
 # Function to preprocess the flow data
-def preprocess_flow(key, flow, scaler=None, debug=0):
+def preprocess_flow(key, flow, debug=0):
     """
     Convert flow information to feature vector for model input
     """
@@ -247,26 +256,6 @@ def preprocess_flow(key, flow, scaler=None, debug=0):
         flow.iat_min / 1000000000,
         flow.iat_max / 1000000000
     ], dtype=np.float32)
-    
-
-    ##################################
-    # DELETE THESE LINES AFTER TESTING
-    # features = np.hstack([categorical_features, numerical_features])
-    # feature_names = [
-    #         'Protocol', 'Flow Duration', 'Total Fwd Packets',
-    #         'Fwd Packets Length Total', 'Flow Bytes/s', 'Flow Packets/s', 'Flow IAT Mean'
-    #     ]
-    # print("========= INFERENCE INPUT =========")
-    # print("BEFORE SCALING:")
-    # for name, value in zip(feature_names, features):
-    #     print(f"{name}: {value}")
-    # print("-" * 23)
-    ##################################
-
-    # UNCOMMENT TO APPLY SCALER
-    # Apply the same scaling as during training to numerical features only
-    # if scaler is not None:
-    #     numerical_features = scaler.transform(numerical_features.reshape(1, -1)).flatten()
     
     # Combine categorical and numerical features
     features = np.hstack([categorical_features, numerical_features])
@@ -309,7 +298,7 @@ def preprocess_flow(key, flow, scaler=None, debug=0):
 
 benign_flows = 0
 malicious_flows = 0
-def process_flow(key, flow, bpf_tables, model, scaler=None, debug=0):
+def process_flow(key, flow, bpf_tables, debug=0):
     # print("In process flow!")
     """
     Process a flow and make classification decisions
@@ -339,35 +328,10 @@ def process_flow(key, flow, bpf_tables, model, scaler=None, debug=0):
         # Check if flow is ready for classification or has timed out
         # if state.value == STATE_READY or (current_time - flow.last_seen > FLOW_TIMEOUT):
         if state.value == STATE_READY:
-            # Use model for classification if available
-            if model is not None:
-                try:
-                    # Preprocess flow data
-                    input_features = preprocess_flow(key, flow, scaler, debug)
-                    
-                    # Need to temporarily set the model to evaluation mode but with no tracking
-                    with torch.no_grad():
-                        # For batch normalization to work with single sample
-                        model.eval()
-                        output = model(input_features)
-                        # Binary classification where 1 = malicious, 0 = benign
-                        prediction = output.item() > 0.5  # Adjust threshold as needed
-                    
-                    # Set state based on model prediction
-                    new_state = STATE_MALICIOUS if prediction else STATE_BENIGN
-                    if prediction:
-                        malicious_flows += 1
-                    else: 
-                        benign_flows +=1
-                    if debug:
-                        print(f"Flow classified as {'MALICIOUS' if prediction else 'BENIGN'} (confidence: {output.item():.4f})")
-                except Exception as e:
-                    print(f"Error during model inference: {e}")
-                    new_state = STATE_MALICIOUS  # Default to malicious on error
-            else:
-                # Fallback to default classification if model not available
-                print("Model not available, using default classification")
-                new_state = STATE_MALICIOUS
+            
+            # Fallback to default classification if model not available
+            print("Model not available, using default classification")
+            new_state = STATE_MALICIOUS
             
             sig_map[key] = ctypes.c_uint32(new_state)
             
@@ -390,23 +354,16 @@ def main():
     # Parse command line arguments
     args = parse_arguments()
 
-    # Load the ML model
-    model = load_model()
-    if model is None:
-        print("Warning: Failed to load model, will use default classification")
-    else:
-        print("Model loaded successfully")
-
-    # Load the feature scaler
-    scaler = load_scaler()
-    if scaler is None:
-        print("Warning: Failed to load feature scaler, predictions may be inaccurate")
-    
     # Load the eBPF program from the source file
     bpf = BPF(src_file=args.source)
     
     # Load and attach the packet handler function
     fn_packet_handler = bpf.load_func(args.func, BPF.XDP)
+
+    # Fill model related maps
+    load_decision_trees(bpf, args.debug)
+
+    # Attach to interface
     bpf.attach_xdp(args.device, fn_packet_handler, 0)
     print(f"XDP program attached to device: {args.device}")
     
@@ -416,8 +373,6 @@ def main():
         "sig_map": bpf.get_table("sig_map"),
         "flow_map": bpf.get_table("flow_map"),
     }
-
-
         
     try:
         print("Flow monitor running. Press Ctrl+C to exit.")
@@ -444,7 +399,7 @@ def main():
                     # Uncomment to debug flow details
                     # if args.debug:
                     #     print_flow_info(key, flow)
-                    process_flow(key, flow, bpf_tables, model, scaler, args.debug)
+                    process_flow(key, flow, bpf_tables, args.debug)
                     
             # Sleep briefly to avoid CPU hogging 
             # time.sleep(0.1)

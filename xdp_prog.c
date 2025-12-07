@@ -20,6 +20,27 @@ BPF_HASH(passed_packets, u32, struct datarec, 1);
 // Map for tracking flow states (Waiting, Ready, Malicious, Benign)
 BPF_TABLE("lru_hash", struct flow_key, enum states, sig_map, 400000);
 
+// Maps for tree_1
+BPF_ARRAY(children_left1, s64, TREE_1_NODES);
+BPF_ARRAY(children_right1, s64, TREE_1_NODES);
+BPF_ARRAY(features1, s64, TREE_1_NODES);
+BPF_ARRAY(thresholds1, s64, TREE_1_NODES);
+BPF_ARRAY(values1, s64, TREE_1_NODES);
+// Maps for tree_2
+BPF_ARRAY(children_left2, s64, TREE_2_NODES);
+BPF_ARRAY(children_right2, s64, TREE_2_NODES);
+BPF_ARRAY(features2, s64, TREE_2_NODES);
+BPF_ARRAY(thresholds2, s64, TREE_2_NODES);
+BPF_ARRAY(values2, s64, TREE_2_NODES);
+// Maps for tree_3
+BPF_ARRAY(children_left3, s64, TREE_3_NODES);
+BPF_ARRAY(children_right3, s64, TREE_3_NODES);
+BPF_ARRAY(features3, s64, TREE_3_NODES);
+BPF_ARRAY(thresholds3, s64, TREE_3_NODES);
+BPF_ARRAY(values3, s64, TREE_3_NODES);
+
+
+
 /* Updates the packet counter for packets that pass through XDP */
 static __always_inline void update_passed_packets(void)
 {
@@ -79,11 +100,13 @@ static __always_inline int update_map(struct flow_key key, struct flow_info info
     // Update last_seen and calculate duration, IAT
     if (rec->last_seen < info.last_seen) {
         rec->last_seen = info.last_seen;
+        // Duration in nanoseconds
         rec->duration = rec->last_seen - rec->first_seen;
         
-        // IAT Calculation
+        // IAT Calculation, scale from ns to microseconds 
+        // unit in dataset is microseconds
         if (packets_old > 0) {
-            iat = rec->last_seen - last_seen_old;
+            iat = (rec->last_seen - last_seen_old) / 1000;
             rec->iat_total = iat_total_old + iat;
             rec->iat_mean = (iat_total_old + iat) / packets_old;
             if(iat_min_old > iat) rec->iat_min = iat;
@@ -97,13 +120,14 @@ static __always_inline int update_map(struct flow_key key, struct flow_info info
 
     // Calculate rates if we have valid duration
     if (rec->duration >= 1000000000) { //if duration >= 1 second
-        // Packets per second with 1 decimal point accuracy (2.3pps -> 23 pps)
-        rec->pps = (rec->packets * 10000000000) / rec->duration;
-        // Bytes per second with no decimal point accuracy
-        rec->bps = (rec->bytes * 1000000000) / rec->duration;
+        // Scaling packets per second like the values in the thresholds map
+        rec->pps = (rec->packets * 1000000000 * 100000) / rec->duration;
+        // Bytes per second with no decimal point accuracy (!not using this feature!)
+        rec->bps = (rec->bytes * 1000000000 * 100000) / rec->duration;
     }
     else {
-        rec->pps = rec->packets;
+        // Scale by 100_000
+        rec->pps = rec->packets * 100000;
         rec->bps = rec->bytes;
     }
 
@@ -249,6 +273,23 @@ int packet_handler(struct xdp_md *ctx)
         // Change the state in sig_map to Ready
         state = Ready;
         sig_map.update(&key, &state);
+        bpf_trace_printk("bout to loop");
+        int current_node = 0;
+        for (int i = 0; i < TREE_1_NODES; i++) {
+            bpf_trace_printk("Node: %d --- ", i);
+            s64 * current_left_child = children_left1.lookup(&current_node);
+            s64 * current_right_child = children_right1.lookup(&current_node);
+            s64 * current_feature = features1.lookup(&current_node);
+            s64 * current_threshold = thresholds1.lookup(&current_node);
+            s64 * current_value = values1.lookup(&current_node);
+            if (current_left_child) bpf_trace_printk("child_left: %lld ",*current_left_child);
+            if (current_right_child) bpf_trace_printk("child_right: %lld ",*current_right_child);
+            if (current_feature) bpf_trace_printk("feature: %lld ",*current_feature);
+            if (current_threshold) bpf_trace_printk("threshold: %lld ",*current_threshold);
+            if (current_value) bpf_trace_printk("value: %lld ",*current_value);
+            
+            current_node++;
+        }
     }
 
     // Increment the counter value for passed packets
