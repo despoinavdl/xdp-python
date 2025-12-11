@@ -29,7 +29,7 @@ struct flow_key
 
 struct flow_info
 {
-    volatile __u32 packets;
+    volatile __u64 packets;
     volatile __u64 bytes;
     __u64 first_seen;
     volatile __u64 last_seen;

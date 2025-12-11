@@ -15,7 +15,7 @@
 BPF_HASH(flow_map, struct flow_key, struct flow_info, XDP_MAX_MAP_ENTRIES);
 
 // Counter for packets that passed through XDP
-BPF_HASH(passed_packets, u32, struct datarec, 1);
+BPF_HASH(passed_packets, u64, struct datarec, 1);
 
 // Map for tracking flow states (Waiting, Ready, Malicious, Benign)
 BPF_TABLE("lru_hash", struct flow_key, enum states, sig_map, 400000);
@@ -44,7 +44,7 @@ BPF_ARRAY(values3, s64, TREE_3_NODES);
 /* Updates the packet counter for packets that pass through XDP */
 static __always_inline void update_passed_packets(void)
 {
-    u32 zero = 0;
+    u64 zero = 0;
     // struct datarec *rec = {0};
     struct datarec new_rec = {.packets = 1};
 
@@ -68,7 +68,7 @@ static __always_inline int update_map(struct flow_key key, struct flow_info info
 {
     struct flow_info *rec;
     int ret;
-    u32 packets_old;
+    u64 packets_old;
     u64 last_seen_old;
     u64 iat_mean_old;
     u64 iat_total_old;
@@ -267,6 +267,7 @@ int packet_handler(struct xdp_md *ctx)
     // Lookup can be avoided if update_map returns packet count
     struct flow_info *updated_flow = flow_map.lookup(&key);
     
+    u64 flow_feature;
     // Check if we've collected enough samples to make a decision (flow timeout? -> userspace)
     if (updated_flow && updated_flow->packets >= PACKETS_SAMPLE && state == Waiting) // || ((current_time - agg.last_seen) > FLOW_TIMEOUT))
     {
@@ -290,6 +291,53 @@ int packet_handler(struct xdp_md *ctx)
             
             current_node++;
         }
+        // Traverse the DT
+        for (int i=0; i<MAX_DEPTH; i++) {
+            bpf_trace_printk("Traversing tree");
+            // Lookup DT values
+            s64 * current_left_child = children_left1.lookup(&current_node);
+            s64 * current_right_child = children_right1.lookup(&current_node);
+            s64 * current_feature = features1.lookup(&current_node);
+            s64 * current_threshold = thresholds1.lookup(&current_node);
+            // Lookup flow values
+            // Indices/Order of Features
+            // 0: Total Length of Fwd Packets  1: Total Fwd Packets
+            // 2: Fwd Packets/s                3: Fwd IAT Mean
+            // 4: Fwd IAT Min                  5: Fwd IAT Max
+            // 6: Fwd IAT Total
+            if(current_feature) {
+                switch (*current_feature)
+                {
+                case 0:
+                    flow_feature = updated_flow->bytes;
+                    break;
+                case 1:
+                    flow_feature = updated_flow->packets;
+                    break;
+                case 2:
+                    flow_feature = updated_flow->pps;
+                    break;
+                case 3:
+                    flow_feature = updated_flow->iat_mean;
+                    break;
+                case 4:
+                    flow_feature = updated_flow->iat_min;
+                    break;
+                case 5:
+                    flow_feature = updated_flow->iat_max;
+                    break;
+                case 6:
+                    flow_feature = updated_flow->iat_total;
+                    break;
+                case -1:
+                    // ???
+                    break;
+                }
+            }
+        }
+        // Check the classification decision on the leaf node
+        // Benign: 0,  Malicious: 1
+        s64 * current_value = values1.lookup(&current_node);
     }
 
     // Increment the counter value for passed packets
