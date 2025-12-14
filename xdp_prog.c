@@ -139,6 +139,85 @@ static __always_inline int update_map(struct flow_key key, struct flow_info info
     return 0;
 }
 
+static __always_inline int traverse_dt(int tree_id, u64 flow_feature, struct flow_key key, enum states state, struct flow_info *updated_flow) {
+    int current_node = 0;
+    for (int i=0; i<MAX_DEPTH; i++) {
+        //bpf_trace_printk("Traversing tree %d", tree_id);
+        // Lookup DT values
+        s64 * current_left_child = 0;
+        s64 * current_right_child = 0;
+        s64 * current_feature = 0;
+        s64 * current_threshold = 0;
+         // Select maps based on tree_id
+        switch (tree_id) {
+            case 1:
+                current_left_child = children_left1.lookup(&current_node);
+                current_right_child = children_right1.lookup(&current_node);
+                current_feature = features1.lookup(&current_node);
+                current_threshold = thresholds1.lookup(&current_node);
+                break;
+            case 2:
+                current_left_child = children_left2.lookup(&current_node);
+                current_right_child = children_right2.lookup(&current_node);
+                current_feature = features2.lookup(&current_node);
+                current_threshold = thresholds2.lookup(&current_node);
+                break;
+            case 3:
+                current_left_child = children_left3.lookup(&current_node);
+                current_right_child = children_right3.lookup(&current_node);
+                current_feature = features3.lookup(&current_node);
+                current_threshold = thresholds3.lookup(&current_node);
+                break;
+            default:
+                return -1;  // Invalid tree_id
+        }
+        
+        // Check if leaf node
+        // note: current_left_child and current_right_child are both < 0 when the node is a leaf
+        // so checking only for one of them is enough
+        if (current_left_child == NULL || current_right_child == NULL || *current_left_child < 0 \
+            || current_feature == NULL || current_threshold == NULL)
+                break;
+        // Lookup flow values
+        // Indices/Order of Features
+        // 0: Total Length of Fwd Packets  1: Total Fwd Packets
+        // 2: Fwd Packets/s                3: Fwd IAT Mean
+        // 4: Fwd IAT Min                  5: Fwd IAT Max
+        // 6: Fwd IAT Total
+        switch (*current_feature) {
+            case 0: flow_feature = updated_flow->bytes; break;
+            case 1: flow_feature = updated_flow->packets; break;
+            case 2: flow_feature = updated_flow->pps; break;
+            case 3: flow_feature = updated_flow->iat_mean; break;
+            case 4: flow_feature = updated_flow->iat_min; break;
+            case 5: flow_feature = updated_flow->iat_max; break;
+            case 6: flow_feature = updated_flow->iat_total; break;
+        }
+        
+        // All values are loaded
+        if(flow_feature <= *current_threshold) {
+            bpf_trace_printk("testing, flow feature value %lld (idx: %lld)", flow_feature, *current_feature);
+            current_node = *current_left_child;
+        }
+        else {
+            current_node = *current_right_child;
+        }
+    }
+
+    // Benign: 0,  Malicious: 1
+    // Get classification result from correct values map (on leaf node)
+    s64 *current_value = NULL;
+    switch (tree_id) {
+        case 1: current_value = values1.lookup(&current_node); break;
+        case 2: current_value = values2.lookup(&current_node); break;
+        case 3: current_value = values3.lookup(&current_node); break;
+    }
+    if(current_value != NULL) {
+        bpf_trace_printk("testing, classification result: %lld ", *current_value);
+        return *current_value;
+    }
+    return -1;
+}
 
 //------------------------------------------------------------------------------
 // MAIN XDP PACKET HANDLER
@@ -265,76 +344,24 @@ int packet_handler(struct xdp_md *ctx)
 
     // bpf_trace_printk("flow packets: %u, PACKETS_SAMPLE: %d\n", agg.packets, PACKETS_SAMPLE);
 
-    // Lookup can be avoided if update_map returns packet count
+    // Lookup can be avoided if update_map returns packet count [oxi?]
     struct flow_info *updated_flow = flow_map.lookup(&key);
     
     u64 flow_feature;
+    int result_1 = 0;
+    int result_2 = 0;
+    int result_3 = 0;
     // Check if we've collected enough samples to make a decision (flow timeout? -> userspace)
     if (updated_flow && updated_flow->packets >= PACKETS_SAMPLE && state == Waiting) // || ((current_time - agg.last_seen) > FLOW_TIMEOUT))
     {
-        // Traverse DT 1
-        int current_node = 0;
-        for (int i=0; i<MAX_DEPTH; i++) {
-            //bpf_trace_printk("Traversing tree 1");
-            // Lookup DT values
-            s64 * current_left_child = children_left1.lookup(&current_node);
-            s64 * current_right_child = children_right1.lookup(&current_node);
-            // Check if leaf node
-            if (current_left_child == NULL || current_right_child == NULL || *current_left_child < 0) 
-            // current_left_child and current_right_child are both < 0 when the node is a leaf
-					break;
-
-            s64 * current_feature = features1.lookup(&current_node);
-            s64 * current_threshold = thresholds1.lookup(&current_node);
-            if (current_feature == NULL || current_threshold == NULL) 
-                break;
-            // Lookup flow values
-            // Indices/Order of Features
-            // 0: Total Length of Fwd Packets  1: Total Fwd Packets
-            // 2: Fwd Packets/s                3: Fwd IAT Mean
-            // 4: Fwd IAT Min                  5: Fwd IAT Max
-            // 6: Fwd IAT Total
-            switch (*current_feature) {
-                case 0:
-                    flow_feature = updated_flow->bytes;
-                    break;
-                case 1:
-                    flow_feature = updated_flow->packets;
-                    break;
-                case 2:
-                    flow_feature = updated_flow->pps;
-                    break;
-                case 3:
-                    flow_feature = updated_flow->iat_mean;
-                    break;
-                case 4:
-                    flow_feature = updated_flow->iat_min;
-                    break;
-                case 5:
-                    flow_feature = updated_flow->iat_max;
-                    break;
-                case 6:
-                    flow_feature = updated_flow->iat_total;
-                    break;
-            }
-            
-            // All values are loaded
-            if(flow_feature <= *current_threshold) {
-                bpf_trace_printk("testing, flow feature value %lld (idx: %lld)", flow_feature, *current_feature);
-                current_node = *current_left_child;
-            }
-            else {
-                current_node = *current_right_child;
-            }
-        }
-        // Check the classification decision on the leaf node
-        // Benign: 0,  Malicious: 1
-        s64 * current_value = values1.lookup(&current_node);
-        if(current_value != NULL) {
-            state = (*current_value == 1) ? Malicious : Benign;
-            sig_map.update(&key, &state);
-            bpf_trace_printk("testing, classification result: %lld ", *current_value);
-        }
+        result_1 = traverse_dt(1, flow_feature, key, state, updated_flow);
+        bpf_trace_printk("result_1 %d", result_1);
+        result_2 = traverse_dt(2, flow_feature, key, state, updated_flow);
+        bpf_trace_printk("result_2 %d", result_2);
+        result_3 = traverse_dt(3, flow_feature, key, state, updated_flow);
+        bpf_trace_printk("result_3 %d", result_3);
+        state = (result_1 + result_2 + result_3 >= 2) ? Malicious : Benign;
+        sig_map.update(&key, &state);
     }
 
     // Increment the counter value for passed packets
