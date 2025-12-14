@@ -121,6 +121,7 @@ static __always_inline int update_map(struct flow_key key, struct flow_info info
     // Calculate rates if we have valid duration
     if (rec->duration >= 1000000000) { //if duration >= 1 second
         // Scaling packets per second like the values in the thresholds map
+        // note: rec->duration is in nanoseconds
         rec->pps = (rec->packets * 1000000000 * 100000) / rec->duration;
         // Bytes per second with no decimal point accuracy (!not using this feature!)
         rec->bps = (rec->bytes * 1000000000 * 100000) / rec->duration;
@@ -271,43 +272,29 @@ int packet_handler(struct xdp_md *ctx)
     // Check if we've collected enough samples to make a decision (flow timeout? -> userspace)
     if (updated_flow && updated_flow->packets >= PACKETS_SAMPLE && state == Waiting) // || ((current_time - agg.last_seen) > FLOW_TIMEOUT))
     {
-        // Change the state in sig_map to Ready
-        state = Ready;
-        sig_map.update(&key, &state);
-        bpf_trace_printk("bout to loop");
+        // Traverse DT 1
         int current_node = 0;
-        for (int i = 0; i < TREE_1_NODES; i++) {
-            bpf_trace_printk("Node: %d --- ", i);
-            s64 * current_left_child = children_left1.lookup(&current_node);
-            s64 * current_right_child = children_right1.lookup(&current_node);
-            s64 * current_feature = features1.lookup(&current_node);
-            s64 * current_threshold = thresholds1.lookup(&current_node);
-            s64 * current_value = values1.lookup(&current_node);
-            if (current_left_child) bpf_trace_printk("child_left: %lld ",*current_left_child);
-            if (current_right_child) bpf_trace_printk("child_right: %lld ",*current_right_child);
-            if (current_feature) bpf_trace_printk("feature: %lld ",*current_feature);
-            if (current_threshold) bpf_trace_printk("threshold: %lld ",*current_threshold);
-            if (current_value) bpf_trace_printk("value: %lld ",*current_value);
-            
-            current_node++;
-        }
-        // Traverse the DT
         for (int i=0; i<MAX_DEPTH; i++) {
-            bpf_trace_printk("Traversing tree");
+            //bpf_trace_printk("Traversing tree 1");
             // Lookup DT values
             s64 * current_left_child = children_left1.lookup(&current_node);
             s64 * current_right_child = children_right1.lookup(&current_node);
+            // Check if leaf node
+            if (current_left_child == NULL || current_right_child == NULL || *current_left_child < 0) 
+            // current_left_child and current_right_child are both < 0 when the node is a leaf
+					break;
+
             s64 * current_feature = features1.lookup(&current_node);
             s64 * current_threshold = thresholds1.lookup(&current_node);
+            if (current_feature == NULL || current_threshold == NULL) 
+                break;
             // Lookup flow values
             // Indices/Order of Features
             // 0: Total Length of Fwd Packets  1: Total Fwd Packets
             // 2: Fwd Packets/s                3: Fwd IAT Mean
             // 4: Fwd IAT Min                  5: Fwd IAT Max
             // 6: Fwd IAT Total
-            if(current_feature) {
-                switch (*current_feature)
-                {
+            switch (*current_feature) {
                 case 0:
                     flow_feature = updated_flow->bytes;
                     break;
@@ -329,15 +316,25 @@ int packet_handler(struct xdp_md *ctx)
                 case 6:
                     flow_feature = updated_flow->iat_total;
                     break;
-                case -1:
-                    // ???
-                    break;
-                }
+            }
+            
+            // All values are loaded
+            if(flow_feature <= *current_threshold) {
+                bpf_trace_printk("testing, flow feature value %lld (idx: %lld)", flow_feature, *current_feature);
+                current_node = *current_left_child;
+            }
+            else {
+                current_node = *current_right_child;
             }
         }
         // Check the classification decision on the leaf node
         // Benign: 0,  Malicious: 1
         s64 * current_value = values1.lookup(&current_node);
+        if(current_value != NULL) {
+            state = (*current_value == 1) ? Malicious : Benign;
+            sig_map.update(&key, &state);
+            bpf_trace_printk("testing, classification result: %lld ", *current_value);
+        }
     }
 
     // Increment the counter value for passed packets
