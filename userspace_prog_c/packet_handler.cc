@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <iostream>
 #include <cstring>
+#include <unordered_map>
 
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
@@ -14,7 +15,8 @@
 #include <netinet/ether.h>
 #include <arpa/inet.h>
 
-#include "flow_headers.h"
+#include "packet-filtering.cc"
+
 
 int packet_handler()
 {
@@ -120,12 +122,83 @@ int packet_handler()
                 dst_ip_str, test_key.dst_port,
                 test_key.protocol);
         
-        // TODO: 
-        // Check if key exists in flow map
-        // if not, initialize it
-        // calculate/update flow_info 
-        // if number of packets of a flow >= PACKETS_SAMPLE is reached traverse the decision trees and classify
-        // update firewall rules (iptables?)
+            // TODO: 
+            // Check if key exists in flow map
+            bool is_new_flow = (flow_map.count(test_key) == 0);
+            struct flow_info current_info;
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            uint64_t current_time = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+            
+            // Set basic packet info
+            memset(&current_info, 0, sizeof(current_info)); // Initialize to zero
+            current_info.last_seen = current_time;
+            current_info.packets = 1;
+            current_info.bytes = buflen;
+
+            if (is_new_flow) {
+                // Initialize new flow            
+                current_info.first_seen = current_time;
+                current_info.iat_min = UINT64_MAX;
+                
+                // Initialize state as Waiting
+                sig_map[test_key] = Waiting;
+            } else {
+                // Update existing flow
+                current_info.first_seen = flow_map[test_key].first_seen;
+            }
+            // calculate/update flow_info 
+            update_map(test_key, current_info);
+            update_passed_packets();
+            
+            // if number of packets of a flow >= PACKETS_SAMPLE is reached traverse the decision trees and classify
+            if (flow_map[test_key].packets >= PACKETS_SAMPLE && sig_map[test_key] == Waiting) {
+                printf("Flow reached %d packets, classifying...\n", PACKETS_SAMPLE);
+                
+                // traverse decision trees and classify
+                int tree1_result = traverse_dt(1, 0, test_key, sig_map[test_key], &flow_map[test_key]);
+                int tree2_result = traverse_dt(2, 0, test_key, sig_map[test_key], &flow_map[test_key]);
+                int tree3_result = traverse_dt(3, 0, test_key, sig_map[test_key], &flow_map[test_key]);
+                
+                // Majority voting: sum the results (0=benign, 1=malicious)
+                int malicious_votes = tree1_result + tree2_result + tree3_result;
+                
+                if (malicious_votes >= 2) {
+                    // Majority says malicious
+                    sig_map[test_key] = Malicious;
+                    printf("Flow classified as MALICIOUS (votes: %d/3)\n", malicious_votes);
+                    
+                    // update firewall rules (iptables?)
+                    char iptables_cmd[512];
+                    snprintf(iptables_cmd, sizeof(iptables_cmd),
+                            "iptables -A INPUT -s %s -p %s --sport %u -d %s --dport %u -j DROP",
+                            src_ip_str,
+                            (protocol == IPPROTO_TCP) ? "tcp" : (protocol == IPPROTO_UDP) ? "udp" : "all",
+                            src_port,
+                            dst_ip_str,
+                            dst_port);
+                    
+                    printf("Executing: %s\n", iptables_cmd);
+                    int ret = system(iptables_cmd);
+                    if (ret != 0) {
+                        printf("Warning: iptables command failed with code %d\n", ret);
+                    }
+                } else {
+                    // Majority says benign
+                    sig_map[test_key] = Benign;
+                    printf("Flow classified as BENIGN (votes: %d/3)\n", malicious_votes);
+                }
+            }
+            
+            // Log current flow stats
+            if (flow_map[test_key].packets % 10 == 0) {  // Every 10 packets
+                printf("Flow stats - Packets: %lu, Bytes: %lu, Duration: %lu ns, PPS: %.2f, IAT Mean: %lu us\n",
+                        flow_map[test_key].packets,
+                        flow_map[test_key].bytes,
+                        flow_map[test_key].duration,
+                        flow_map[test_key].pps / 100000.0,  // Unscale for display,
+                        flow_map[test_key].iat_mean);
+            }
         }
     }
 
@@ -133,4 +206,25 @@ int packet_handler()
     free(buffer);
 
     return 0;
+}
+
+int main()
+{
+    load_tree_data("../decision-tree1/children_left", children_left1);
+    load_tree_data("../decision-tree1/children_right", children_right1);
+    load_tree_data("../decision-tree1/features", features1);
+    load_tree_data("../decision-tree1/thresholds", thresholds1);
+    load_tree_data("../decision-tree1/values", values1);
+    load_tree_data("../decision-tree2/children_left", children_left2);
+    load_tree_data("../decision-tree2/children_right", children_right2);
+    load_tree_data("../decision-tree2/features", features2);
+    load_tree_data("../decision-tree2/thresholds", thresholds2);
+    load_tree_data("../decision-tree2/values", values2);
+    load_tree_data("../decision-tree3/children_left", children_left3);
+    load_tree_data("../decision-tree3/children_right", children_right3);
+    load_tree_data("../decision-tree3/features", features3);
+    load_tree_data("../decision-tree3/thresholds", thresholds3);
+    load_tree_data("../decision-tree3/values", values3);
+
+    return packet_handler();
 }

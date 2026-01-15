@@ -9,12 +9,13 @@
 #include <sstream>
 #include <string>
 
-#include "packet_handler.cc"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <linux/if_packet.h> // AF_PACKET
 #include <linux/if_ether.h>  // ETH_P_ALL
 #include <unistd.h>        // close()
+
+#include "flow_headers.h"
 
 // Constants
 // #define UINT64_MAX (~0ULL) // Maximum value for 64-bit unsigned integer
@@ -214,13 +215,6 @@ static inline int traverse_dt(int tree_id, uint64_t flow_feature, struct flow_ke
  * 
  */
 
-int main()
-{
-    return packet_handler();
-}
-
-
-
 // int packet_handler(struct xdp_md *ctx)
 // {
 //     // Access packet data
@@ -379,7 +373,7 @@ bool load_tree_data(const std::string& filename,
     }
     
     file.close();
-    std::cout << "Loaded " << target_vector.size() << " values from " << filename << std::endl;
+    // std::cout << "Loaded " << target_vector.size() << " values from " << filename << std::endl;
     return true;
 }
 
