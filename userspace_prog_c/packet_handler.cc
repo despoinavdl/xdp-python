@@ -8,6 +8,8 @@
 #include <iostream>
 #include <cstring>
 #include <unordered_map>
+#include <signal.h>          // signal handling
+#include <stdlib.h>          // exit()
 
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
@@ -17,6 +19,46 @@
 
 #include "packet-filtering.cc"
 
+// Verbosity level: 0 = quiet, 1 = normal, 2 = verbose, 3 = very verbose
+int verbosity = 0;
+
+// Statistics counters
+uint64_t total_flows = 0;
+uint64_t malicious_flows = 0;
+uint64_t benign_flows = 0;
+
+// Global socket file descriptor for signal handler
+int global_sock_fd = -1;
+
+void print_statistics() {
+    std::cout << "\n=== Final Statistics ===\n";
+    std::cout << "Total flows processed: " << total_flows << "\n";
+    std::cout << "Malicious flows: " << malicious_flows << "\n";
+    std::cout << "Benign flows: " << benign_flows << "\n";
+    std::cout << "Unclassified flows: " << (total_flows - malicious_flows - benign_flows) << "\n";
+    std::cout << "========================\n";
+}
+
+// Signal handler for Ctrl+C
+void signal_handler(int signum) {
+    if (signum == SIGINT) {
+        std::cout << "\n\n=== Caught SIGINT (Ctrl+C) - Shutting down ===\n";
+        
+        // Print statistics
+        print_statistics();
+        
+        // Close the socket
+        if (global_sock_fd >= 0) {
+            close(global_sock_fd);
+            if (verbosity >= 1) {
+                std::cout << "Socket closed.\n";
+            }
+        }
+        
+        std::cout << "Exiting...\n";
+        exit(0);
+    }
+}
 
 int packet_handler()
 {
@@ -27,8 +69,13 @@ int packet_handler()
         perror("socket");
         return -1;
     }
+    
+    // Store globally for signal handler
+    global_sock_fd = sock_fd;
 
-    std::cout << "Raw socket created: " << sock_fd << std::endl;
+    if (verbosity >= 1) {
+        std::cout << "Raw socket created: " << sock_fd << std::endl;
+    }
 
     // Get interface index
     const char* interface_name = "veth0";
@@ -44,7 +91,9 @@ int packet_handler()
     }
 
     int ifindex = ifr.ifr_ifindex;
-    std::cout << "Interface " << interface_name << " has index: " << ifindex << std::endl;
+    if (verbosity >= 1) {
+        std::cout << "Interface " << interface_name << " has index: " << ifindex << std::endl;
+    }
 
     // Bind socket to the specific interface using sockaddr_ll
     struct sockaddr_ll sll;
@@ -60,7 +109,9 @@ int packet_handler()
         return -1;
     }
 
-    std::cout << "Socket bound to interface: " << interface_name << std::endl;
+    if (verbosity >= 1) {
+        std::cout << "Socket bound to interface: " << interface_name << std::endl;
+    }
 
     unsigned char *buffer = (unsigned char *) malloc(65536); 
     memset(buffer, 0, 65536);
@@ -117,14 +168,20 @@ int packet_handler()
             inet_ntop(AF_INET, &src_addr, src_ip_str, INET_ADDRSTRLEN);
             inet_ntop(AF_INET, &dst_addr, dst_ip_str, INET_ADDRSTRLEN);
 
-            printf("Flow: %s:%u -> %s:%u (proto: %u)\n",
-                src_ip_str, test_key.src_port,
-                dst_ip_str, test_key.dst_port,
-                test_key.protocol);
+            if (verbosity >= 3) {
+                printf("Flow: %s:%u -> %s:%u (proto: %u)\n",
+                    src_ip_str, test_key.src_port,
+                    dst_ip_str, test_key.dst_port,
+                    test_key.protocol);
+            }
         
-            // TODO: 
             // Check if key exists in flow map
             bool is_new_flow = (flow_map.count(test_key) == 0);
+            
+            if (is_new_flow) {
+                total_flows++;
+            }
+            
             struct flow_info current_info;
             struct timespec ts;
             clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -147,13 +204,16 @@ int packet_handler()
                 // Update existing flow
                 current_info.first_seen = flow_map[test_key].first_seen;
             }
+            
             // calculate/update flow_info 
             update_map(test_key, current_info);
             update_passed_packets();
             
             // if number of packets of a flow >= PACKETS_SAMPLE is reached traverse the decision trees and classify
             if (flow_map[test_key].packets >= PACKETS_SAMPLE && sig_map[test_key] == Waiting) {
-                printf("Flow reached %d packets, classifying...\n", PACKETS_SAMPLE);
+                if (verbosity >= 3) {
+                    printf("Flow reached %d packets, classifying...\n", PACKETS_SAMPLE);
+                }
                 
                 // traverse decision trees and classify
                 int tree1_result = traverse_dt(1, 0, test_key, sig_map[test_key], &flow_map[test_key]);
@@ -166,7 +226,12 @@ int packet_handler()
                 if (malicious_votes >= 2) {
                     // Majority says malicious
                     sig_map[test_key] = Malicious;
-                    printf("Flow classified as MALICIOUS (votes: %d/3)\n", malicious_votes);
+                    malicious_flows++;
+                    
+                    if (verbosity >= 2) {
+                        printf("Flow classified as MALICIOUS (votes: %d/3): %s:%u -> %s:%u\n", 
+                               malicious_votes, src_ip_str, src_port, dst_ip_str, dst_port);
+                    }
                     
                     // update firewall rules (iptables?)
                     char iptables_cmd[512];
@@ -178,7 +243,10 @@ int packet_handler()
                             dst_ip_str,
                             dst_port);
                     
-                    printf("Executing: %s\n", iptables_cmd);
+                    if (verbosity >= 3) {
+                        printf("Executing: %s\n", iptables_cmd);
+                    }
+                    
                     int ret = system(iptables_cmd);
                     if (ret != 0) {
                         printf("Warning: iptables command failed with code %d\n", ret);
@@ -186,17 +254,21 @@ int packet_handler()
                 } else {
                     // Majority says benign
                     sig_map[test_key] = Benign;
-                    printf("Flow classified as BENIGN (votes: %d/3)\n", malicious_votes);
+                    benign_flows++;
+                    
+                    if (verbosity >= 3) {
+                        printf("Flow classified as BENIGN (votes: %d/3)\n", malicious_votes);
+                    }
                 }
             }
             
             // Log current flow stats
-            if (flow_map[test_key].packets % 10 == 0) {  // Every 10 packets
+            if (verbosity >= 3 && flow_map[test_key].packets % 10 == 0) {  // Every 10 packets
                 printf("Flow stats - Packets: %lu, Bytes: %lu, Duration: %lu ns, PPS: %.2f, IAT Mean: %lu us\n",
                         flow_map[test_key].packets,
                         flow_map[test_key].bytes,
                         flow_map[test_key].duration,
-                        flow_map[test_key].pps / 100000.0,  // Unscale for display,
+                        flow_map[test_key].pps / 100000.0,  // Unscale for display
                         flow_map[test_key].iat_mean);
             }
         }
@@ -208,23 +280,54 @@ int packet_handler()
     return 0;
 }
 
-int main()
+int main(int argc, char *argv[])
 {
-    load_tree_data("../decision-tree1/children_left", children_left1);
-    load_tree_data("../decision-tree1/children_right", children_right1);
-    load_tree_data("../decision-tree1/features", features1);
-    load_tree_data("../decision-tree1/thresholds", thresholds1);
-    load_tree_data("../decision-tree1/values", values1);
-    load_tree_data("../decision-tree2/children_left", children_left2);
-    load_tree_data("../decision-tree2/children_right", children_right2);
-    load_tree_data("../decision-tree2/features", features2);
-    load_tree_data("../decision-tree2/thresholds", thresholds2);
-    load_tree_data("../decision-tree2/values", values2);
-    load_tree_data("../decision-tree3/children_left", children_left3);
-    load_tree_data("../decision-tree3/children_right", children_right3);
-    load_tree_data("../decision-tree3/features", features3);
-    load_tree_data("../decision-tree3/thresholds", thresholds3);
-    load_tree_data("../decision-tree3/values", values3);
+    // Parse command-line arguments for verbosity
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-v") == 0) {
+            verbosity = 1;
+        } else if (strcmp(argv[i], "-vv") == 0) {
+            verbosity = 2;
+        } else if (strcmp(argv[i], "-vvv") == 0) {
+            verbosity = 3;
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            std::cout << "Usage: " << argv[0] << " [OPTIONS]\n";
+            std::cout << "Options:\n";
+            std::cout << "  -v      Normal verbosity (basic info)\n";
+            std::cout << "  -vv     Verbose (classification results)\n";
+            std::cout << "  -vvv    Very verbose (all debug info)\n";
+            std::cout << "  -h, --help  Show this help message\n";
+            return 0;
+        }
+    }
+    
+    // Register signal handler for Ctrl+C
+    signal(SIGINT, signal_handler);
+    
+    if (verbosity >= 1) {
+        std::cout << "Loading decision tree data...\n";
+    }
+    
+    if (!load_tree_data("../decision-tree1/children_left", children_left1)) return -1;
+    if (!load_tree_data("../decision-tree1/children_right", children_right1)) return -1;
+    if (!load_tree_data("../decision-tree1/features", features1)) return -1;
+    if (!load_tree_data("../decision-tree1/thresholds", thresholds1)) return -1;
+    if (!load_tree_data("../decision-tree1/values", values1)) return -1;
+    if (!load_tree_data("../decision-tree2/children_left", children_left2)) return -1;
+    if (!load_tree_data("../decision-tree2/children_right", children_right2)) return -1;
+    if (!load_tree_data("../decision-tree2/features", features2)) return -1;
+    if (!load_tree_data("../decision-tree2/thresholds", thresholds2)) return -1;
+    if (!load_tree_data("../decision-tree2/values", values2)) return -1;
+    if (!load_tree_data("../decision-tree3/children_left", children_left3)) return -1;
+    if (!load_tree_data("../decision-tree3/children_right", children_right3)) return -1;
+    if (!load_tree_data("../decision-tree3/features", features3)) return -1;
+    if (!load_tree_data("../decision-tree3/thresholds", thresholds3)) return -1;
+    if (!load_tree_data("../decision-tree3/values", values3)) return -1;
+
+    if (verbosity >= 1) {
+        std::cout << "All tree data loaded successfully!\n";
+        std::cout << "Starting packet handler (Press Ctrl+C to stop)...\n";
+    }
 
     return packet_handler();
 }
