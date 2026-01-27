@@ -249,9 +249,10 @@ def main():
 
     # Fill model related maps
     load_decision_trees(bpf, args.debug)
-
+    XDP_FLAGS_DRV_MODE = (1 << 2)
+    print(f"XDP program flags: {XDP_FLAGS_DRV_MODE}")
     # Attach to interface
-    bpf.attach_xdp(args.device, fn_packet_handler, 0)
+    bpf.attach_xdp(args.device, fn_packet_handler, XDP_FLAGS_DRV_MODE)
     print(f"XDP program attached to device: {args.device}")
     
     # Get all the BPF maps
