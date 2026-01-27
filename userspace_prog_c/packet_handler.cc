@@ -20,7 +20,9 @@
 #include "packet-filtering.cc"
 
 // Verbosity level: 0 = quiet, 1 = normal, 2 = verbose, 3 = very verbose
-int verbosity = 0;
+int verbosity = 3;
+const char* interface_name = "veth0";
+
 
 // Statistics counters
 uint64_t total_flows = 0;
@@ -60,7 +62,7 @@ void signal_handler(int signum) {
     }
 }
 
-int packet_handler()
+int packet_handler(const char* interface_name)
 {
     int sock_fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
 
@@ -78,7 +80,7 @@ int packet_handler()
     }
 
     // Get interface index
-    const char* interface_name = "veth0";
+    // const char* interface_name = "veth0"; moved to global
     struct ifreq ifr;
     memset(&ifr, 0, sizeof(ifr));
     strncpy(ifr.ifr_name, interface_name, IFNAMSIZ - 1);
@@ -235,13 +237,22 @@ int packet_handler()
                     
                     // update firewall rules (iptables?)
                     char iptables_cmd[512];
+                    // If the protocol is TCP or UDP, include --sport and --dport
+                    if (protocol == IPPROTO_TCP || protocol == IPPROTO_UDP) {
                     snprintf(iptables_cmd, sizeof(iptables_cmd),
                             "iptables -A INPUT -s %s -p %s --sport %u -d %s --dport %u -j DROP",
                             src_ip_str,
-                            (protocol == IPPROTO_TCP) ? "tcp" : (protocol == IPPROTO_UDP) ? "udp" : "all",
+                                (protocol == IPPROTO_TCP) ? "tcp" : "udp",
                             src_port,
-                            dst_ip_str,
-                            dst_port);
+                                dst_ip_str,
+                                dst_port);
+                    } else {
+                        // If the protocol is neither TCP nor UDP, use -p all without --sport and --dport
+                        snprintf(iptables_cmd, sizeof(iptables_cmd),
+                                "iptables -A INPUT -s %s -p all -d %s -j DROP",
+                                src_ip_str,
+                                dst_ip_str);
+                    }
                     
                     if (verbosity >= 3) {
                         printf("Executing: %s\n", iptables_cmd);
@@ -298,7 +309,20 @@ int main(int argc, char *argv[])
             std::cout << "  -vvv    Very verbose (all debug info)\n";
             std::cout << "  -h, --help  Show this help message\n";
             return 0;
+        } else if (strcmp(argv[i], "-i") == 0) {
+            if (i + 1 < argc) {
+                interface_name = argv[i + 1];
+                i++; // skip next argument since it's the interface name
+            } else {
+                std::cerr << "Error: -i requires an interface name\n";
+                return 1;
+            }
         }
+    }
+
+    if (!interface_name) {
+        std::cerr << "Error: no interface specified. Use -i <interface>\n";
+        return 1;
     }
     
     // Register signal handler for Ctrl+C
@@ -329,5 +353,5 @@ int main(int argc, char *argv[])
         std::cout << "Starting packet handler (Press Ctrl+C to stop)...\n";
     }
 
-    return packet_handler();
+    return packet_handler(interface_name);
 }
