@@ -242,7 +242,8 @@ def main():
     args = parse_arguments()
 
     # Load the eBPF program from the source file
-    bpf = BPF(src_file=args.source)
+    cflags = ["-DDEBUG_TRACE"] if args.debug else []
+    bpf = BPF(src_file=args.source, cflags=cflags)
     
     # Load and attach the packet handler function
     fn_packet_handler = bpf.load_func(args.func, BPF.XDP)

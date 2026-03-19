@@ -35,7 +35,7 @@ struct flow_info
     volatile __u64 last_seen;
     volatile __u64 duration;
     volatile __u64 pps;
-    volatile __u32 bps;
+    volatile __u64 bps;
     volatile __u64 iat_mean; // mean inter arrival time between packets of a flow
     volatile __u64 iat_total;
     volatile __u64 iat_min;

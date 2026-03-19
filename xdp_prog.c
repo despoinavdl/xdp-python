@@ -8,9 +8,8 @@
 
 #include "flow_headers.h"
 
-// Constants
-#define UINT64_MAX (~0ULL) // Maximum value for 64-bit unsigned integer
-#define UINT32_MAX (~0U)   // Maximum value for 32-bit unsigned integer
+#define UINT64_MAX (~0ULL)
+#define UINT32_MAX (~0U)
 
 BPF_HASH(flow_map, struct flow_key, struct flow_info, XDP_MAX_MAP_ENTRIES);
 
@@ -20,24 +19,18 @@ BPF_HASH(passed_packets, u64, struct datarec, 1);
 // Map for tracking flow states (Waiting, Ready, Malicious, Benign)
 BPF_TABLE("lru_hash", struct flow_key, enum states, sig_map, 400000);
 
-// Maps for tree_1
-BPF_ARRAY(children_left1, s64, TREE_1_NODES);
-BPF_ARRAY(children_right1, s64, TREE_1_NODES);
-BPF_ARRAY(features1, s64, TREE_1_NODES);
-BPF_ARRAY(thresholds1, s64, TREE_1_NODES);
-BPF_ARRAY(values1, s64, TREE_1_NODES);
-// Maps for tree_2
-BPF_ARRAY(children_left2, s64, TREE_2_NODES);
-BPF_ARRAY(children_right2, s64, TREE_2_NODES);
-BPF_ARRAY(features2, s64, TREE_2_NODES);
-BPF_ARRAY(thresholds2, s64, TREE_2_NODES);
-BPF_ARRAY(values2, s64, TREE_2_NODES);
-// Maps for tree_3
-BPF_ARRAY(children_left3, s64, TREE_3_NODES);
-BPF_ARRAY(children_right3, s64, TREE_3_NODES);
-BPF_ARRAY(features3, s64, TREE_3_NODES);
-BPF_ARRAY(thresholds3, s64, TREE_3_NODES);
-BPF_ARRAY(values3, s64, TREE_3_NODES);
+// Decision tree maps (5 arrays per tree)
+#define DECLARE_TREE_MAPS(N, NODES)           \
+    BPF_ARRAY(children_left##N, s64, NODES);  \
+    BPF_ARRAY(children_right##N, s64, NODES); \
+    BPF_ARRAY(features##N, s64, NODES);       \
+    BPF_ARRAY(thresholds##N, s64, NODES);     \
+    BPF_ARRAY(values##N, s64, NODES);
+
+DECLARE_TREE_MAPS(1, TREE_1_NODES)
+DECLARE_TREE_MAPS(2, TREE_2_NODES)
+DECLARE_TREE_MAPS(3, TREE_3_NODES)
+
 
 
 
@@ -139,16 +132,15 @@ static __always_inline int update_map(struct flow_key key, struct flow_info info
     return 0;
 }
 
-static __always_inline int traverse_dt(int tree_id, u64 flow_feature, struct flow_key key, enum states state, struct flow_info *updated_flow) {
+static __always_inline int traverse_dt(int tree_id, struct flow_info *flow) {
     int current_node = 0;
-    for (int i=0; i<MAX_DEPTH; i++) {
-        //bpf_trace_printk("Traversing tree %d", tree_id);
-        // Lookup DT values
-        s64 * current_left_child = 0;
-        s64 * current_right_child = 0;
-        s64 * current_feature = 0;
-        s64 * current_threshold = 0;
-         // Select maps based on tree_id
+    u64 flow_feature = 0;
+
+    for (int i = 0; i < MAX_DEPTH; i++) {
+        s64 *current_left_child = NULL;
+        s64 *current_right_child = NULL;
+        s64 *current_feature = NULL;
+        s64 *current_threshold = NULL;
         switch (tree_id) {
             case 1:
                 current_left_child = children_left1.lookup(&current_node);
@@ -168,8 +160,7 @@ static __always_inline int traverse_dt(int tree_id, u64 flow_feature, struct flo
                 current_feature = features3.lookup(&current_node);
                 current_threshold = thresholds3.lookup(&current_node);
                 break;
-            default:
-                return -1;  // Invalid tree_id
+            default: return -1;
         }
         
         // Check if leaf node
@@ -178,25 +169,27 @@ static __always_inline int traverse_dt(int tree_id, u64 flow_feature, struct flo
         if (current_left_child == NULL || current_right_child == NULL || *current_left_child < 0 \
             || current_feature == NULL || current_threshold == NULL)
                 break;
-        // Lookup flow values
-        // Indices/Order of Features
+        // Feature indices:
         // 0: Total Length of Fwd Packets  1: Total Fwd Packets
-        // 2: Fwd Packets/s                3: Fwd IAT Mean
-        // 4: Fwd IAT Min                  5: Fwd IAT Max
+        // 2: Fwd Packets/s               3: Fwd IAT Mean
+        // 4: Fwd IAT Min                 5: Fwd IAT Max
         // 6: Fwd IAT Total
         switch (*current_feature) {
-            case 0: flow_feature = updated_flow->bytes; break;
-            case 1: flow_feature = updated_flow->packets; break;
-            case 2: flow_feature = updated_flow->pps; break;
-            case 3: flow_feature = updated_flow->iat_mean; break;
-            case 4: flow_feature = updated_flow->iat_min; break;
-            case 5: flow_feature = updated_flow->iat_max; break;
-            case 6: flow_feature = updated_flow->iat_total; break;
+            case 0: flow_feature = flow->bytes; break;
+            case 1: flow_feature = flow->packets; break;
+            case 2: flow_feature = flow->pps; break;
+            case 3: flow_feature = flow->iat_mean; break;
+            case 4: flow_feature = flow->iat_min; break;
+            case 5: flow_feature = flow->iat_max; break;
+            case 6: flow_feature = flow->iat_total; break;
+            default: return -1;
         }
         
         // All values are loaded
         if(flow_feature <= *current_threshold) {
+#ifdef DEBUG_TRACE
             bpf_trace_printk("testing, flow feature value %lld (idx: %lld)", flow_feature, *current_feature);
+#endif
             current_node = *current_left_child;
         }
         else {
@@ -213,7 +206,9 @@ static __always_inline int traverse_dt(int tree_id, u64 flow_feature, struct flo
         case 3: current_value = values3.lookup(&current_node); break;
     }
     if(current_value != NULL) {
+#ifdef DEBUG_TRACE
         bpf_trace_printk("testing, classification result: %lld ", *current_value);
+#endif
         return *current_value;
     }
     return -1;
@@ -254,13 +249,9 @@ int packet_handler(struct xdp_md *ctx)
         return XDP_DROP;
     }
 
-    // Only process IPv4 packets
-    if (ntohs(eth->h_proto) != ETH_P_IP) {
-        return XDP_DROP;
-        // update_passed_packets();
-        // printk("EtherType: 0x%x\n", ntohs(eth->h_proto));
-        // return XDP_PASS;
-    }
+    // Only process IPv4 packets; pass everything else (ARP, IPv6, etc.)
+    if (ntohs(eth->h_proto) != ETH_P_IP)
+        return XDP_PASS;
 
     // Extract IP addresses and protocol
     struct iphdr *ip = data + sizeof(*eth);
@@ -342,26 +333,20 @@ int packet_handler(struct xdp_md *ctx)
     // Update flow_map
     update_map(key, info);
 
-    // bpf_trace_printk("flow packets: %u, PACKETS_SAMPLE: %d\n", agg.packets, PACKETS_SAMPLE);
-
-    // Lookup can be avoided if update_map returns packet count [oxi?]
     struct flow_info *updated_flow = flow_map.lookup(&key);
-    
-    u64 flow_feature;
-    int result_1 = 0;
-    int result_2 = 0;
-    int result_3 = 0;
-    // Check if we've collected enough samples to make a decision (flow timeout? -> userspace)
-    if (updated_flow && updated_flow->packets >= PACKETS_SAMPLE && state == Waiting) // || ((current_time - agg.last_seen) > FLOW_TIMEOUT))
-    {
-        result_1 = traverse_dt(1, flow_feature, key, state, updated_flow);
-        bpf_trace_printk("result_1 %d", result_1);
-        result_2 = traverse_dt(2, flow_feature, key, state, updated_flow);
-        bpf_trace_printk("result_2 %d", result_2);
-        result_3 = traverse_dt(3, flow_feature, key, state, updated_flow);
-        bpf_trace_printk("result_3 %d", result_3);
-        state = (result_1 + result_2 + result_3 >= 2) ? Malicious : Benign;
-        sig_map.update(&key, &state);
+
+    // Classify once we have enough samples
+    if (updated_flow && updated_flow->packets >= PACKETS_SAMPLE && state == Waiting) {
+        int result_1 = traverse_dt(1, updated_flow);
+        int result_2 = traverse_dt(2, updated_flow);
+        int result_3 = traverse_dt(3, updated_flow);
+
+        // Only classify if all trees returned valid results
+        if (result_1 >= 0 && result_2 >= 0 && result_3 >= 0) {
+            int votes = result_1 + result_2 + result_3;
+            state = (votes >= 2) ? Malicious : Benign;
+            sig_map.update(&key, &state);
+        }
     }
 
     // Increment the counter value for passed packets
