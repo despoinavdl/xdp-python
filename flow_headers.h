@@ -29,17 +29,17 @@ struct flow_key
 
 struct flow_info
 {
-    volatile __u64 packets;
-    volatile __u64 bytes;
+    __u64 packets;
+    __u64 bytes;
     __u64 first_seen;
-    volatile __u64 last_seen;
-    volatile __u64 duration;
-    volatile __u64 pps;
-    volatile __u64 bps;
-    volatile __u64 iat_mean; // mean inter arrival time between packets of a flow
-    volatile __u64 iat_total;
-    volatile __u64 iat_min;
-    volatile __u64 iat_max;
+    __u64 last_seen;
+    __u64 duration;
+    __u64 pps;
+    __u64 bps;
+    __u64 iat_mean;
+    __u64 iat_total;
+    __u64 iat_min;
+    __u64 iat_max;
     struct bpf_spin_lock lock;
 };
 

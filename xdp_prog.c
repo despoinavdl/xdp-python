@@ -9,7 +9,6 @@
 #include "flow_headers.h"
 
 #define UINT64_MAX (~0ULL)
-#define UINT32_MAX (~0U)
 
 BPF_HASH(flow_map, struct flow_key, struct flow_info, XDP_MAX_MAP_ENTRIES);
 
@@ -31,20 +30,14 @@ DECLARE_TREE_MAPS(1, TREE_1_NODES)
 DECLARE_TREE_MAPS(2, TREE_2_NODES)
 DECLARE_TREE_MAPS(3, TREE_3_NODES)
 
-
-
-
 /* Updates the packet counter for packets that pass through XDP */
 static __always_inline void update_passed_packets(void)
 {
     u64 zero = 0;
-    // struct datarec *rec = {0};
     struct datarec new_rec = {.packets = 1};
 
     struct datarec *rec = (struct datarec *)passed_packets.lookup(&zero);
-    if (!rec)
-    {
-        // First entry - initialize the counter
+    if (!rec) {
         passed_packets.insert(&zero, &new_rec);
         return;
     }
@@ -52,84 +45,56 @@ static __always_inline void update_passed_packets(void)
     lock_xadd(&rec->packets, 1);
 }
 
-/* Updates a hash map with flow information
- * key: Hashed flow key
+/* Updates a hash map with flow information and returns pointer to the entry.
+ * key: Flow key
  * info: Flow information to store/update
- * return 0 on success, -1 on error
+ * return pointer to the flow_info entry, or NULL on error
  */
-static __always_inline int update_map(struct flow_key key, struct flow_info info)
+static __always_inline struct flow_info *update_map(struct flow_key key, struct flow_info info)
 {
-    struct flow_info *rec;
-    int ret;
-    u64 packets_old;
-    u64 last_seen_old;
-    u64 iat_mean_old;
-    u64 iat_total_old;
-    u64 iat_min_old;
-    u64 iat_max_old;
-    u64 iat;
-
-    rec = (struct flow_info *)flow_map.lookup(&key);
+    struct flow_info *rec = (struct flow_info *)flow_map.lookup(&key);
 
     // If entry doesn't exist yet, initialize it
     if (!rec) {
-        // Insert new entry 
         flow_map.update(&key, &info);
-        return 0;
+        return flow_map.lookup(&key);
     }
 
-    // Entry exists - update it with new information
-    // Acquire lock
     bpf_spin_lock(&rec->lock);
 
-    // Save old values for Mean IAT calculation
-    packets_old = rec->packets;
-    last_seen_old = rec->last_seen;
-    iat_mean_old = rec->iat_mean;
-    iat_total_old = rec->iat_total;
-    iat_min_old = rec->iat_min;
-    iat_max_old = rec->iat_max;
+    u64 prev_packets = rec->packets;
+    u64 prev_last_seen = rec->last_seen;
 
-    // Update last_seen and calculate duration, IAT
-    if (rec->last_seen < info.last_seen) {
-        rec->last_seen = info.last_seen;
-        // Duration in nanoseconds
-        rec->duration = rec->last_seen - rec->first_seen;
-        
-        // IAT Calculation, scale from ns to microseconds 
-        // unit in dataset is microseconds
-        if (packets_old > 0) {
-            iat = (rec->last_seen - last_seen_old) / 1000;
-            rec->iat_total = iat_total_old + iat;
-            rec->iat_mean = (iat_total_old + iat) / packets_old;
-            if(iat_min_old > iat) rec->iat_min = iat;
-            if(iat_max_old < iat) rec->iat_max = iat;
-        }
-    }
-    
-    // Update packet and byte counters, if this packet is newer than what we've seen
+    // Update packet and byte counters
     rec->packets += info.packets;
     rec->bytes += info.bytes;
 
-    // Calculate rates if we have valid duration
-    if (rec->duration >= 1000000000) { //if duration >= 1 second
-        // Scaling packets per second like the values in the thresholds map
-        // note: rec->duration is in nanoseconds
-        rec->pps = (rec->packets * 1000000000 * 100000) / rec->duration;
-        // Bytes per second with no decimal point accuracy (!not using this feature!)
-        rec->bps = (rec->bytes * 1000000000 * 100000) / rec->duration;
+    // Update timestamps, duration, and IAT
+    if (prev_last_seen < info.last_seen) {
+        rec->last_seen = info.last_seen;
+        rec->duration = rec->last_seen - rec->first_seen;
+
+        // IAT calculation (ns -> microseconds to match dataset units)
+        if (prev_packets > 0) {
+            u64 iat = (info.last_seen - prev_last_seen) / 1000;
+            rec->iat_total += iat;
+            rec->iat_mean = rec->iat_total / prev_packets;
+            if (rec->iat_min > iat) rec->iat_min = iat;
+            if (rec->iat_max < iat) rec->iat_max = iat;
+        }
     }
-    else {
-        // Scale by 100_000
+
+    // Calculate rates (scaled by 100_000 to match threshold map values)
+    if (rec->duration >= 1000000000) {
+        rec->pps = (rec->packets * 1000000000 * 100000) / rec->duration;
+        rec->bps = (rec->bytes * 1000000000 * 100000) / rec->duration;
+    } else {
         rec->pps = rec->packets * 100000;
         rec->bps = rec->bytes;
     }
 
-    bpf_spin_unlock(&rec->lock);  // Release lock
-
-    // flow_map.update(&key, rec); not needed since pointer is being updated
-
-    return 0;
+    bpf_spin_unlock(&rec->lock);
+    return rec;
 }
 
 static __always_inline int traverse_dt(int tree_id, struct flow_info *flow) {
@@ -163,12 +128,11 @@ static __always_inline int traverse_dt(int tree_id, struct flow_info *flow) {
             default: return -1;
         }
         
-        // Check if leaf node
-        // note: current_left_child and current_right_child are both < 0 when the node is a leaf
-        // so checking only for one of them is enough
-        if (current_left_child == NULL || current_right_child == NULL || *current_left_child < 0 \
-            || current_feature == NULL || current_threshold == NULL)
-                break;
+        // Check if leaf node (left_child < 0 indicates leaf)
+        if (current_left_child == NULL || current_right_child == NULL ||
+            current_feature == NULL || current_threshold == NULL ||
+            *current_left_child < 0)
+            break;
         // Feature indices:
         // 0: Total Length of Fwd Packets  1: Total Fwd Packets
         // 2: Fwd Packets/s               3: Fwd IAT Mean
@@ -186,7 +150,7 @@ static __always_inline int traverse_dt(int tree_id, struct flow_info *flow) {
         }
         
         // All values are loaded
-        if(flow_feature <= *current_threshold) {
+        if (flow_feature <= *current_threshold) {
 #ifdef DEBUG_TRACE
             bpf_trace_printk("testing, flow feature value %lld (idx: %lld)", flow_feature, *current_feature);
 #endif
@@ -205,7 +169,7 @@ static __always_inline int traverse_dt(int tree_id, struct flow_info *flow) {
         case 2: current_value = values2.lookup(&current_node); break;
         case 3: current_value = values3.lookup(&current_node); break;
     }
-    if(current_value != NULL) {
+    if (current_value != NULL) {
 #ifdef DEBUG_TRACE
         bpf_trace_printk("testing, classification result: %lld ", *current_value);
 #endif
@@ -242,7 +206,6 @@ int packet_handler(struct xdp_md *ctx)
     // Initialize flow key and info structures
     struct flow_key key = {0};
     struct flow_info info = {0};
-    int ret;
 
     if ((void *)eth + sizeof(*eth) > data_end) {
         // Malformed packet - drop it
@@ -255,8 +218,7 @@ int packet_handler(struct xdp_md *ctx)
 
     // Extract IP addresses and protocol
     struct iphdr *ip = data + sizeof(*eth);
-    if ((void *)ip + sizeof(*ip) > data_end)
-    {
+    if ((void *)ip + sizeof(*ip) > data_end) {
         // Malformed packet - drop it
         return XDP_DROP;
     }
@@ -266,32 +228,23 @@ int packet_handler(struct xdp_md *ctx)
     key.protocol = ip->protocol;
 
     // Extract ports based on protocol (TCP or UDP)
-    if (key.protocol == IPPROTO_TCP) // Handle TCP packets
-    {
+    if (key.protocol == IPPROTO_TCP) {
         struct tcphdr *tcp = (void *)ip + sizeof(*ip);
         if ((void *)tcp + sizeof(*tcp) > data_end) {
             update_passed_packets();
             return XDP_PASS;
         }
-
-        key.src_port = tcp->source; // Extract TCP source port
-        key.dst_port = tcp->dest;   // Extract TCP destination port
-    }
-    else if (key.protocol == IPPROTO_UDP) // Handle UDP packets
-    {
-        // return XDP_DROP;
+        key.src_port = tcp->source;
+        key.dst_port = tcp->dest;
+    } else if (key.protocol == IPPROTO_UDP) {
         struct udphdr *udp = (void *)ip + sizeof(*ip);
         if ((void *)udp + sizeof(*udp) > data_end) {
             update_passed_packets();
             return XDP_PASS;
         }
-
-        key.src_port = udp->source; // Extract UDP source port
-        key.dst_port = udp->dest;   // Extract UDP destination port
-    }
-    else
-    {
-        // Other protocols don't have ports
+        key.src_port = udp->source;
+        key.dst_port = udp->dest;
+    } else {
         key.src_port = 0;
         key.dst_port = 0;
     }
@@ -314,9 +267,6 @@ int packet_handler(struct xdp_md *ctx)
         sig_map.update(&key, &state);
     }
 
-    // Set initial state if not already classified
-    // sig_map.update(&key, &state);
-
     // Initialize flow info structure with packet details
     info.packets = 1;
     info.bytes = size;
@@ -330,10 +280,7 @@ int packet_handler(struct xdp_md *ctx)
     info.iat_min = UINT64_MAX;
     info.iat_max = 0;
 
-    // Update flow_map
-    update_map(key, info);
-
-    struct flow_info *updated_flow = flow_map.lookup(&key);
+    struct flow_info *updated_flow = update_map(key, info);
 
     // Classify once we have enough samples
     if (updated_flow && updated_flow->packets >= PACKETS_SAMPLE && state == Waiting) {
